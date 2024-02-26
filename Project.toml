@@ -1,4 +1,4 @@
-name = "MPSDynamics_GPU"
+name = "MPSDynamics"
 uuid = "1dfab1b9-d792-4ff3-aa83-843b44f02519"
 authors = [
     "angus-dunnett <angus.dunnett@gmail.com>", 
