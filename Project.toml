@@ -1,3 +1,11 @@
+name = "MPSDynamics"
+uuid = "1dfab1b9-d792-4ff3-aa83-843b44f02519"
+authors = [
+    "angus-dunnett <angus.dunnett@gmail.com>", 
+    "Kye Hunter <huntekye@oregonstate.edu>"
+]
+version = "1.0"
+
 [deps]
 CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
