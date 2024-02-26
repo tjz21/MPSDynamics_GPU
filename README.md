@@ -5,9 +5,10 @@ dual fluorescence in proflavine" by Kye E. Hunter, Yuezhi Mao, Alex W. Chin, and
  Tim J. Zuehlsdoff. 
 
 This fork of [MPSDynamics.jl](https://github.com/angusdunnett/MPSDynamics.git) 
-has been modified so that some parts are now GPU accelerated. Please see the 
-upstream repository for additional background and documentation. The majority of
- the changes in this version are in `src/MPSDynamics.jl` and `scr/tensorOps.jl`.
+has been modified by Kye E. Hunter so that some parts are now GPU accelerated. 
+Please see the upstream repository for additional background and documentation. 
+The majority of the changes in this version are in `src/MPSDynamics.jl` and 
+`scr/tensorOps.jl`.
 
 ## Installation
 
