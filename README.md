@@ -18,7 +18,7 @@ The package may be installed by typing the following into a Julia REPL
 ```
 
 Importantly, for julia to install the package with GPU acceleration, it must be
- install while logged into a machine which has GPUs. This might not usually be 
+ installed while logged into a machine which has GPUs. This might not usually be 
 an issue, but for computing clusters it is best to install the package from one 
 of the nodes on which you intend to run these calculations.
 

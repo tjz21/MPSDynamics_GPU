@@ -16,23 +16,24 @@
 ######### INPUT PARAMETERS #######################
 run_name = "Test calculation"
 
-# System paramters (all in atomic units)
-energy_1 = 0.12408798072882796
-energy_2 = 0.12459917009076196 
-coupling = -6.86427563218691e-05
-dipole_moment_1 = 2.8843819410939373
-dipole_moment_2 = 0.2913931174285718
+# System paramters (in atomic units)
+energy_1        = 0.12408798072882796   # average S1 energy
+energy_2        = 0.12459917009076196   # average S2 energy
+coupling        = -6.86427563218691e-05 # average S1-S2 coupling energy
+dipole_moment_1 = 2.8843819410939373    # average S1 transition dipole moment
+dipole_moment_2 = 0.2913931174285718    # average S2 transition dipole moment
+temp            = 300                   # in Kelvin
 
 savedir = pwd() * "/"
 coeffsdir = savedir * "chain_coeffs.hdf5"
 
 # Convergence parameters
-time_step    = 10     # in hartree (1 ~ 0.025 fs)
-total_time   = 100    # typical values: 4000-10000
-temp         = 300    # in Kelvin
-chain_length = 10     # typical values: 150-300
-num_fock     = 10     # typical values: 20-30
-bond_dims    = [10]   # typical values: 20-60
+time_step             = 10    # in hartree (1 ~ 0.025 fs)
+total_time_absorption = 100   # typical values: 4000-10000
+total_time_emission   = 100   # typical values: 4000-5000
+chain_length          = 10    # typical values: 150-300
+num_fock              = 10    # typical values: 20-30
+bond_dims             = [10]  # typical values: 20-60
 ##################################################
 
 # Load MPSDynamics with GPU acceleration
@@ -114,7 +115,7 @@ ob13 = M.OneSiteObservable("s0s1", s0 * s1', 1)
 
 # Propogate the excited state (to calculate the absorption spectrum)
 mps_relaxed, dat = M.runsim(
-    time_step, total_time, mps, mpo;
+    time_step, total_time_absorption, mps, mpo;
     name = run_name * ": Absorption",
     unid = "absorption",
     method = :TDVP1,
@@ -139,7 +140,7 @@ mps_relaxed[1][:, :, :, :, 3] = (
 )
 # Propagate again (to calculate the emission spectrum)
 mps_relaxed_2, dat = M.runsim(
-    time_step, total_time, mps_relaxed, mpo;
+    time_step, total_time_emission, mps_relaxed, mpo;
     name = run_name * ": Emission",
     unid = "emission",
     method = :TDVP1,
