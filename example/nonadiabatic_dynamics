@@ -39,12 +39,15 @@ bond_dims             = [10]  # typical values: 20-60
 # Load MPSDynamics with GPU acceleration
 push!(ARGS, "GPU")
 using CUDA
-include("~/.julia/packages/MPSDynamics_GPU/<weird_code>/src/MPSDynamics.jl")
-# Ensure that this is the real path        ^^^^^^^^^^^^
+include(
+    homedir() 
+    * "/.julia/packages/MPSDynamics_GPU/d0AFh/src/MPSDynamics.jl"
+# Ensure that this is the real path     ^^^^^
+)
 M = MPSDynamics
 
 # The GPU accelerated code still supports running on CPUs by loading as follows:
-#include("~/.julia/packages/MPSDynamics_GPU/weird_code/src/MPSDynamics.jl")
+#include(homedir() * "/.julia/packages/MPSDynamics_GPU/d0AFh/src/MPSDynamics.jl")
 #M = MPSDynamics
 
 # Read the chain coefficients
