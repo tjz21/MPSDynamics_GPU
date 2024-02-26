@@ -1,0 +1,159 @@
+#! julia -O3
+# ^^^^^^^^^^ You will probably want to modify this shebang line with the path to
+# your local julia binary.
+
+# MPSDynamics wrapper for linear emission spectroscopy, modified to run on GPUs
+# The settings given in this example input file will not produce a converged
+# spectrum, but can be used for a fast test that the GPU accelerated code is 
+# installed and working correctly, as well as to provide a template for similar 
+# calculations.
+# With the current settings (mostly 10s) the calculation takes ~5 minutes on an
+# NVidia GeForce RTX 3080 with 10 GB GPU RAM.
+
+# Written by Kye Hunter
+# Last updated 20240223
+
+######### INPUT PARAMETERS #######################
+run_name = "Test calculation"
+
+# System paramters (all in atomic units)
+energy_1 = 0.12408798072882796
+energy_2 = 0.12459917009076196 
+coupling = -6.86427563218691e-05
+dipole_moment_1 = 2.8843819410939373
+dipole_moment_2 = 0.2913931174285718
+
+savedir = pwd() * "/"
+coeffsdir = savedir * "chain_coeffs.hdf5"
+
+# Convergence parameters
+time_step    = 10     # in hartree (1 ~ 0.025 fs)
+total_time   = 100    # typical values: 4000-10000
+temp         = 300    # in Kelvin
+chain_length = 10     # typical values: 150-300
+num_fock     = 10     # typical values: 20-30
+bond_dims    = [10]   # typical values: 20-60
+##################################################
+
+# Load MPSDynamics with GPU acceleration
+push!(ARGS, "GPU")
+using CUDA
+include("~/.julia/packages/MPSDynamics_GPU/<weird_code>/src/MPSDynamics.jl")
+# Ensure that this is the real path        ^^^^^^^^^^^^
+M = MPSDynamics
+
+# The GPU accelerated code still supports running on CPUs by loading as follows:
+#include("~/.julia/packages/MPSDynamics_GPU/weird_code/src/MPSDynamics.jl")
+#M = MPSDynamics
+
+# Read the chain coefficients
+s1_chain_coeffs = M.readchaincoeffs(
+    coeffsdir, "temp_" * string(temp), "s1"
+)
+long_range_s1_to_s2 = M.h5read(
+    coeffsdir, "temp_" * string(temp) * "/long_range_s1_to_s2"
+)
+s2_chain_coeffs = M.readchaincoeffs(
+    coeffsdir, "temp_" * string(temp), "s2"
+)
+long_range_s2_to_s1 = M.h5read(
+    coeffsdir, "temp_" * string(temp) * "/long_range_s2_to_s1"
+)
+s1_s2_coupling = M.readchaincoeffs(
+    coeffsdir, "temp_" * string(temp), "s1_s2_coupling"
+)
+
+# Construct the system Hamiltonian (a matrix product operator)
+mpo = M.methylbluempo2(
+    energy_1,     energy_2,     coupling, 
+    chain_length, chain_length, chain_length, 
+    num_fock,     num_fock,     num_fock, 
+    s1_chain_coeffs, long_range_s1_to_s2, long_range_s2_to_s1, s2_chain_coeffs, 
+    s1_s2_coupling
+)
+
+# Define operators for the system
+s2 = M.unitcol(1, 3)
+s1 = M.unitcol(2, 3)
+s0 = M.unitcol(3, 3)
+# Normalization constant
+a = sqrt(1 / (1 + dipole_moment_1 ^ 2 + dipole_moment_2 ^ 2))
+# Define initial populations
+psi = a * (s0 + dipole_moment_1 * s1 + dipole_moment_2 * s2)
+# The dipole moment creation operator
+mu = (1 / a ^ 2) * (dipole_moment_1 * s0 * s1' + dipole_moment_2 * s0 * s2')
+
+# Calculate the initial wavefunction
+mps = M.productstatemps(
+    mpo.tree, 
+    M.physdims(mpo), 
+    state = [psi, fill(M.unitcol(1, num_fock), 3 * chain_length)...]
+)
+
+# Occupancies at certain sites in the network
+# Every node on the S1 chain
+ob4 = M.OneSiteObservable("occ1", M.numb(num_fock), (2, chain_length + 1))
+# Every node on the S2 chain
+ob5 = M.OneSiteObservable(
+    "occ2", M.numb(num_fock), (chain_length + 2, 2 * chain_length + 1)
+)
+# Every node on the S1-S2 coupling chain
+ob6 = M.OneSiteObservable(
+    "occ12", M.numb(num_fock), (2 * chain_length + 2, 3 * chain_length +1)
+)
+# The dipole creation operator, and thereby the dipole correlation function
+ob7 = M.OneSiteObservable("dcf", mu, 1)
+# Populations
+ob8 = M.OneSiteObservable("s0", s0 * s0', 1)
+ob9 = M.OneSiteObservable("s1", s1 * s1', 1)
+ob10 = M.OneSiteObservable("s2", s2 * s2', 1)
+# Coherences
+ob11 = M.OneSiteObservable("s1s2", s1 * s2', 1)
+ob12 = M.OneSiteObservable("s0s2", s0 * s2', 1)
+ob13 = M.OneSiteObservable("s0s1", s0 * s1', 1)
+
+# Propogate the excited state (to calculate the absorption spectrum)
+mps_relaxed, dat = M.runsim(
+    time_step, total_time, mps, mpo;
+    name = run_name * ": Absorption",
+    unid = "absorption",
+    method = :TDVP1,
+    savedir = savedir,
+    obs = [],
+    convobs = [ob7, ob8, ob9, ob10],
+    convparams = bond_dims,
+    verbose = false,
+    save = true,
+    plot = true,
+    params = M.@LogParams(
+        psi, 
+        energy_1, energy_2, coupling, dipole_moment_1, dipole_moment_2, 
+        temp, chain_length, num_fock
+    )
+)
+
+# Project population back to S0:
+mps_relaxed[1][:, :, :, :, 3] = (
+    dipole_moment_1 *  mps_relaxed[1][:, :, :, :, 2] 
+    + dipole_moment_2 *  mps_relaxed[1][:, :, :, :, 1]
+)
+# Propagate again (to calculate the emission spectrum)
+mps_relaxed_2, dat = M.runsim(
+    time_step, total_time, mps_relaxed, mpo;
+    name = run_name * ": Emission",
+    unid = "emission",
+    method = :TDVP1,
+    savedir = savedir,
+    obs = [],
+    convobs = [ob7, ob8, ob9, ob10],
+    convparams = bond_dims,
+    verbose = false,
+    save = true,
+    plot = true,
+    params = M.@LogParams(
+        psi, 
+        energy_1, energy_2, coupling, dipole_moment_1, dipole_moment_2, 
+        temp, chain_length, num_fock
+    )
+)
+
