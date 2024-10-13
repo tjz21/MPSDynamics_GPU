@@ -45,7 +45,7 @@ if GPU
 end
 
 function ACOAC(AC::Array{T1, 3}, O::Array{T2, 2}) where {T1,T2}
-    @tensor v = scalar(conj(AC[a,b,s']) * O[s',s] * AC[a,b,s])
+    @tensor v = tensorscalar(conj(AC[a,b,s']) * O[s',s] * AC[a,b,s])
 end
 
 #EDIT
