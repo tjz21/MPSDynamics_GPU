@@ -84,10 +84,10 @@ function contractC!(A::Union{CuArray{T1,6},Array{T1,6}}, C::Union{Array{T2,2},Cu
 end
 
 function rhoAAstar(ρ::Union{CuArray{T1,2},Array{T1,2}}, A::Union{CuArray{T2,2},Array{T2,2}}, indir::Int) where {T1,T2}
-    @tensoropt ρO = scalar(ρ[a0,b0] * conj(A)[a0,s] * A[b0,s])
+    @tensoropt ρO = tensorscalar(ρ[a0,b0] * conj(A)[a0,s] * A[b0,s])
 end
 function rhoAAstar(ρ::Union{CuArray{T1,3},Array{T1,2}}, A::Union{CuArray{T2,2},Array{T2,2}}) where {T1,T2}
-    @tensoropt ρO = scalar(ρ[a0,b0] * conj(A[a0,s]) * A[b0,s])
+    @tensoropt ρO = tensorscalar(ρ[a0,b0] * conj(A[a0,s]) * A[b0,s])
 end
 function rhoAAstar(ρ::Union{CuArray{T1,2},Array{T1,2}}, A::Union{CuArray{T2,3},Array{T2,3}}, indir::Int, outdir::Int) where {T1,T2}
     indir==1 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[a0,a,s]) * A[b0,b,s]
@@ -130,35 +130,35 @@ end
 
 #EDIT
 function rhoAOAstar(ρ::Union{Array{T1,2},CuArray{T1,2}}, A::Union{Array{T2,2},CuArray{T2,2}}, O::Union{Array{T3,2},CuArray{T3,2}}, indir::Int, ::Nothing) where {T1,T2,T3}
-    @tensoropt ρO = scalar(ρ[a0,b0] * CuArray{ComplexF64}(conj(A))[a0,s'] * CuArray{ComplexF64}(O)[s',s] * CuArray{ComplexF64}(A)[b0,s])
+    @tensoropt ρO = tensorscalar(ρ[a0,b0] * CuArray{ComplexF64}(conj(A))[a0,s'] * CuArray{ComplexF64}(O)[s',s] * CuArray{ComplexF64}(A)[b0,s])
 end
 #EDIT
 function rhoAOAstar(ρ::Union{Array{T1,2},CuArray{T1,2}}, A::Union{Array{T2,2},CuArray{T2,2}}, O::Union{Array{T3,2},CuArray{T3,2}}, ::Nothing) where {T1,T2,T3}
-    @tensoropt ρO = scalar(ρ[a0,b0] * CuArray{ComplexF64}(conj(A))[a0,s'] * CuArray{ComplexF64}(O)[s',s] * CuArray{ComplexF64}(A)[b0,s])
+    @tensoropt ρO = tensorscalar(ρ[a0,b0] * CuArray{ComplexF64}(conj(A))[a0,s'] * CuArray{ComplexF64}(O)[s',s] * CuArray{ComplexF64}(A)[b0,s])
 end
 #EDIT
 function rhoAOAstar(ρ::Union{Array{T1,2},CuArray{T1,2}}, A::Union{CuArray{T2,3},Array{T2,3}}, O::Union{Array{T3,2},CuArray{T3,2}}, indir::Int, ::Nothing) where {T1,T2,T3}
-    indir==1 && return @tensoropt ρO = scalar(ρ[a0,b0] * CuArray{ComplexF64}(conj(A))[a0,c0,s'] * CuArray{ComplexF64}(O)[s',s] * CuArray{ComplexF64}(A)[b0,c0,s])
-    indir==2 && return @tensoropt ρO = scalar(ρ[a0,b0] * CuArray{ComplexF64}(conj(A))[c0,a0,s'] * CuArray{ComplexF64}(O)[s',s] * CuArray{ComplexF64}(A)[c0,b0,s])
+    indir==1 && return @tensoropt ρO = tensorscalar(ρ[a0,b0] * CuArray{ComplexF64}(conj(A))[a0,c0,s'] * CuArray{ComplexF64}(O)[s',s] * CuArray{ComplexF64}(A)[b0,c0,s])
+    indir==2 && return @tensoropt ρO = tensorscalar(ρ[a0,b0] * CuArray{ComplexF64}(conj(A))[c0,a0,s'] * CuArray{ComplexF64}(O)[s',s] * CuArray{ComplexF64}(A)[c0,b0,s])
 end
 #EDIT
 function rhoAOAstar(ρ::Union{Array{T1,2},CuArray{T1,2}}, A::Union{CuArray{T2,3},Array{T2,3}}, O::Union{Array{T3,2},CuArray{T3,2}}, ::Nothing) where {T1,T2,T3}
-    return @tensoropt ρO = scalar(ρ[a0,b0] * conj(A)[a0,c0,s'] * O[s',s] * A[b0,c0,s])
+    return @tensoropt ρO = tensorscalar(ρ[a0,b0] * conj(A)[a0,c0,s'] * O[s',s] * A[b0,c0,s])
 end
 
 #EDIT
 function rhoAOAstar(ρ::Union{Array{T1,2},CuArray{T1,2}}, A::Union{CuArray{T2,4},Array{T2,4}}, O::Union{Array{T3,2},CuArray{T3,2}}, indir::Int, ::Nothing) where {T1,T2,T3}
-    indir==1 && return @tensoropt ρO = scalar(ρ[a0,b0] * conj(A[a0,c0,c1,s']) * O[s',s] * A[b0,c0,c1,s])
-    indir==2 && return @tensoropt ρO = scalar(ρ[a0,b0] * conj(A[c0,a0,c1,s']) * O[s',s] * A[c0,b0,c1,s])
-    indir==3 && return @tensoropt ρO = scalar(ρ[a0,b0] * conj(A[c0,c1,a0,s']) * O[s',s] * A[c0,c1,b0,s])
+    indir==1 && return @tensoropt ρO = tensorscalar(ρ[a0,b0] * conj(A[a0,c0,c1,s']) * O[s',s] * A[b0,c0,c1,s])
+    indir==2 && return @tensoropt ρO = tensorscalar(ρ[a0,b0] * conj(A[c0,a0,c1,s']) * O[s',s] * A[c0,b0,c1,s])
+    indir==3 && return @tensoropt ρO = tensorscalar(ρ[a0,b0] * conj(A[c0,c1,a0,s']) * O[s',s] * A[c0,c1,b0,s])
 end
 #EDIT
 function rhoAOAstar(ρ::Union{Array{T1,2},CuArray{T1,2}}, A::Union{Array{T2,5},CuArray{T2,5}}, O::Union{Array{T3,2},CuArray{T3,2}}, indir::Int, ::Nothing) where {T1,T2,T3}
 #EDIT
-    indir==1 && return @tensoropt ρO = scalar(CuArray(ρ)[a0,b0] * CuArray(conj(A))[a0,c0,c1,c2,s'] * CuArray(O)[s',s] * CuArray(A)[b0,c0,c1,c2,s])
-    indir==2 && return @tensoropt ρO = scalar(ρ[a0,b0] * conj(A[c0,a0,c1,c2,s']) * O[s',s] * A[c0,b0,c1,c2,s])
-    indir==3 && return @tensoropt ρO = scalar(ρ[a0,b0] * conj(A[c0,c1,a0,c2,s']) * O[s',s] * A[c0,c1,b0,c2,s])
-    indir==4 && return @tensoropt ρO = scalar(ρ[a0,b0] * conj(A[c0,c1,c2,a0,s']) * O[s',s] * A[c0,c1,c2,b0,s])
+    indir==1 && return @tensoropt ρO = tensorscalar(CuArray(ρ)[a0,b0] * CuArray(conj(A))[a0,c0,c1,c2,s'] * CuArray(O)[s',s] * CuArray(A)[b0,c0,c1,c2,s])
+    indir==2 && return @tensoropt ρO = tensorscalar(ρ[a0,b0] * conj(A[c0,a0,c1,c2,s']) * O[s',s] * A[c0,b0,c1,c2,s])
+    indir==3 && return @tensoropt ρO = tensorscalar(ρ[a0,b0] * conj(A[c0,c1,a0,c2,s']) * O[s',s] * A[c0,c1,b0,c2,s])
+    indir==4 && return @tensoropt ρO = tensorscalar(ρ[a0,b0] * conj(A[c0,c1,c2,a0,s']) * O[s',s] * A[c0,c1,c2,b0,s])
 end
 
 #EDIT
