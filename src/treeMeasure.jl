@@ -10,7 +10,11 @@ function measure1siteoperator(net::TreeNetwork, O, id::Int)
 end
 
 function measure1siteoperator(net::TreeNetwork, O, sites::Tuple{Int,Int})
-    ρ = ones(ComplexF64, 1, 1)
+    # Edit to initialize rho as a CuArray. This avoids the initial call to rhoAAStar
+    # to fail due to a contraction between a CuTensor and a normal Tensor (no longer
+    # allowed in the newer versions of TensorOperations.jl
+    ρ = CuArray(ones(ComplexF64, 1, 1))
+    #ρ = ones(ComplexF64, 1, 1)
     firstsite = sites[1]
     lastsite = sites[2]
 
