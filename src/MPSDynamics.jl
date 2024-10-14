@@ -4,30 +4,31 @@ GPU = false
 if length(ARGS) > 0 && ARGS[1] == "GPU"
 
   # A CUDA compatible macro to overwrite TensorOperations.@tensoropt
-  macro tensoropt(expressions...)
-    if length(expressions) == 1
-      ex = expressions[1]
-      optdict = TensorOperations.optdata(ex)
-    elseif length(expressions) == 2
-      optex = expressions[1]
-      ex = expressions[2]
-      optdict = TensorOperations.optdata(optex, ex)
-    end
+  # is this still needed? 
+  #macro tensoropt(expressions...)
+  #  if length(expressions) == 1
+  #    ex = expressions[1]
+  #    optdict = TensorOperations.optdata(ex)
+  #  elseif length(expressions) == 2
+  #    optex = expressions[1]
+  #    ex = expressions[2]
+  #    optdict = TensorOperations.optdata(optex, ex)
+  #  end
 
-    cuwrapdict = Dict{Any,Any}()
-    parser = TensorOperations.TensorParser()
-    parser.contractiontreebuilder = network -> TensorOperations.optimaltree(
-      network, optdict
-    )[1]
-    parser.preprocessors[end] = ex -> TensorOperations.extracttensorobjects(
-      ex, cuwrapdict
-    )
-    push!(
-      parser.postprocessors, 
-      ex -> TensorOperations.addcutensorwraps(ex, cuwrapdict)
-    )
-    return esc(parser(ex))
-  end
+  #  cuwrapdict = Dict{Any,Any}()
+  #  parser = TensorOperations.TensorParser()
+  #  parser.contractiontreebuilder = network -> TensorOperations.optimaltree(
+  #    network, optdict
+  #  )[1]
+  #  parser.preprocessors[end] = ex -> TensorOperations.extracttensorobjects(
+  #    ex, cuwrapdict
+  #  )
+  #  push!(
+  #    parser.postprocessors, 
+  #    ex -> TensorOperations.addcutensorwraps(ex, cuwrapdict)
+  #  )
+  #  return esc(parser(ex))
+  #end
 
   using CUDA
   # We also overwrite @tensor; this does most of the GPU acceleration for us.
