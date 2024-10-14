@@ -103,7 +103,7 @@ if length(ARGS) > 0 && ARGS[1] == "GPU"
   GPU = true
   println("Attempting to run on GPUs")
   # make sure to load cuTensor
-  using cuTENSOR
+
 else
   # Define CuArray and CuMatrix as dummy variables to avoid errors
   CuArray = Array
