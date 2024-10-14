@@ -4,7 +4,6 @@
 # simple implementation to replace it (that actually seems to be faster on CPUs 
 # as well)
 if GPU
-    using cuTENSOR
     import KrylovKit: exponentiate
     """
         exponentiate(A,t::Number,x,tol = 1e-12,maxiter = 50)
