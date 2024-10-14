@@ -46,8 +46,11 @@ function mpsrightnorm!(net::TreeNetwork, id::Int)
         IA=collect(1:nc+2)
         IC[i+1]=-1
 
-	#EDIT
-        net[id] = tensorcontract(CuArray(net[id]), IA, CuArray(C), [i+1,-1], IC)
+	#EDIT TJZ to make things work with newest version of TensorOperations
+	# reorder so that IC index is determined first. 
+	net[id] = tensorcontract(IC, CuArray(net[id]), IA, CuArray(C), [i+1,-1])
+	#EDIT Kye:
+        #net[id] = tensorcontract(CuArray(net[id]), IA, CuArray(C), [i+1,-1], IC)
         #net[id] = tensorcontract(net[id], IA, C, [i+1,-1], IC)
     end
 end
