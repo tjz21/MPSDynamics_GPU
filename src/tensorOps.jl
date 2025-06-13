@@ -1,206 +1,243 @@
+using CUDA, cuTENSOR, TensorOperations
 
-#EDIT
-# The KrylovKit function exponentiate seems to not work on GPUs, so here is a 
-# simple implementation to replace it (that actually seems to be faster on CPUs 
-# as well)
-if GPU
-    import KrylovKit: exponentiate
-    """
-        exponentiate(A,t::Number,x,tol = 1e-12,maxiter = 50)
+import KrylovKit: exponentiate
 
-    Evaluate e ** (t * A) * x with a power series.
+"""
+    exponentiate!(A_op, t::Number, x_target::CuArray; tol = 1e-12, maxiter = 250, kwargs...)
 
-    `A` can be an arbitrary linear map, it should impliment a __call__ method.
-    The key to making this efficient is not recalculating the powers of `A` and
-    the factorial at every iteration. `t` is separate from `A` so that `A` can
-    remain real if `t` is complex.
-    The power series has the form
+Evaluate e ** (t * A_op) * x_target with a power series.
 
-        x + t * A(x) + t ** 2 * A ** 2(x) / 2 + t ** 3 * A ** 3(x) / 6 + ...
-    """
-    function exponentiate(A,t::Number,x;tol = 1e-12,maxiter = 250,kwargs...)
-        counter = 0
-        converged = false
-        temp_x = CuArray(deepcopy(x))
-        temp_t = 1
-        output = CuArray(deepcopy(x))
-        temp_output = CuArray(deepcopy(x))
-        while counter < maxiter
-            temp_x = CuArray(A(temp_x)) / (counter + 1)
-            temp_t = temp_t * t
-            output = temp_output + temp_t * temp_x
-            if sum(abs.(output .* tol) .< abs.(output .- temp_output)) == 0
+`A_op` can be an arbitrary linear map, it should impliment a __call__ method.
+The key to making this efficient is not recalculating the powers of `A_op` and
+the factorial at every iteration. `t` is separate from `A_op` so that `A_op` can
+remain real if `t` is complex.
+The power series has the form
+
+    x_target + t * A_op(x_target) + t ** 2 * A_op ** 2(x_target) / 2 + t ** 3 * A_op ** 3(x_target) / 6 + ...
+"""
+function exponentiate!(A_op, t::Number, x_target::CuArray; tol = 1e-12, maxiter = 250, kwargs...)
+    iter_count = 0 
+    converged = false
+
+    current_term_generator = deepcopy(x_target) # stores (A^k x_0)/k! part, starts with (A^0 x_0)/0!
+
+    term_to_add_to_sum = similar(x_target)
+
+    current_t_power_k = t
+
+    last_added_term_norm = 0.0
+
+    while iter_count < maxiter
+        A_op_output = A_op(current_term_generator)
+
+        A_op_output ./= (iter_count + 1)
+        
+        current_term_generator = A_op_output # Update to the new (A_op^(iter_count+1) x_0) / (iter_count+1)!
+
+        copyto!(term_to_add_to_sum, current_term_generator)
+        rmul!(term_to_add_to_sum, current_t_power_k)
+
+        x_target .+= term_to_add_to_sum
+
+        # Convergence Check
+        last_added_term_norm = norm(term_to_add_to_sum)
+        x_target_norm = norm(x_target)
+            
+        if x_target_norm > tol 
+            if last_added_term_norm < tol * x_target_norm
                 converged = true
                 break
-            else
-                temp_output = output
             end
-            counter += 1
+        elseif last_added_term_norm < tol 
+             converged = true
+             break
         end
-        residual = norm(temp_output .- output)
-        # Debugging line for checking convergence
-        #println("exponentiate converged in $counter iterations, residual is $residual")
-        return output, Dict([("converged", converged), ("iter", counter + 1)])
+        
+        iter_count += 1
+        current_t_power_k *= t 
     end
+
+    return (converged = converged, iterations = iter_count, residual = last_added_term_norm)
 end
 
-function ACOAC(AC::Array{T1, 3}, O::Array{T2, 2}) where {T1,T2}
+function ACOAC(AC::AbstractArray{T1, 3}, O::AbstractArray{T2, 2}) where {T1,T2}
     @tensor v = tensorscalar(conj(AC[a,b,s']) * O[s',s] * AC[a,b,s])
 end
 
-#EDIT
-function contractC!(A::Union{Array{T1,2},CuArray{T1,2}}, C::Union{Array{T2,2},CuArray{T2,2}}, dir::Int) where {T1,T2}
-    return @tensor A[a0,s] := A[a0',s] * C[a0,a0']
+function contractC!(A::CuArray{T1,2}, C::CuArray{T2,2}, dir::Int) where {T1,T2}
+    A_new = @tensor A[a0,s] := A[a0',s] * C[a0,a0']
+    return A_new
 end
-#EDIT
-function contractC!(A::Union{CuArray{T1,3},Array{T1,3}}, C::Union{Array{T2,2},CuArray{T2,2}}, dir::Int) where {T1,T2}
-    dir==1 && return @tensor A[a0,a1,s] := A[a0',a1,s] * C[a0,a0']
-    dir==2 && return @tensor A[a0,a1,s] := A[a0,a1',s] * C[a1,a1']
-    throw("invalid argument dir=$dir")
+function contractC!(A::CuArray{T1,3}, C::CuArray{T2,2}, dir::Int) where {T1,T2}
+    local A_new
+    if dir==1
+        A_new = @tensor A[a0,a1,s] := A[a0',a1,s] * C[a0,a0']
+    elseif dir==2
+        A_new = @tensor A[a0,a1,s] := A[a0,a1',s] * C[a1,a1']
+    else
+        throw("invalid argument dir=$dir")
+    end
+    return A_new
 end
-#EDIT
-function contractC!(A::Union{CuArray{T1,4},Array{T1,4}}, C::Union{Array{T2,2},CuArray{T2,2}}, dir::Int) where {T1,T2}
-    dir==1 && return @tensor A[a0,a1,a2,s] := A[a0',a1,a2,s] * C[a0,a0']
-    dir==2 && return @tensor A[a0,a1,a2,s] := A[a0,a1',a2,s] * C[a1,a1']
-    dir==3 && return @tensor A[a0,a1,a2,s] := A[a0,a1,a2',s] * C[a2,a2']
-    throw("invalid argument dir=$dir")
+function contractC!(A::CuArray{T1,4}, C::CuArray{T2,2}, dir::Int) where {T1,T2}
+    local A_new
+    if dir==1
+        A_new = @tensor A[a0,a1,a2,s] := A[a0',a1,a2,s] * C[a0,a0']
+    elseif dir==2
+        A_new = @tensor A[a0,a1,a2,s] := A[a0,a1',a2,s] * C[a1,a1']
+    elseif dir==3
+        A_new = @tensor A[a0,a1,a2,s] := A[a0,a1,a2',s] * C[a2,a2']
+    else
+        throw("invalid argument dir=$dir")
+    end
+    return A_new
 end
-#EDIT
-function contractC!(A::Union{CuArray{T1,5},Array{T1,5}}, C::Union{Array{T2,2},CuArray{T2,2}}, dir::Int) where {T1,T2}
-    dir==1 && return @tensor A[a0,a1,a2,a3,s] := A[a0',a1,a2,a3,s] * C[a0,a0']
-    dir==2 && return @tensor A[a0,a1,a2,a3,s] := A[a0,a1',a2,a3,s] * C[a1,a1']
-    dir==3 && return @tensor A[a0,a1,a2,a3,s] := A[a0,a1,a2',a3,s] * C[a2,a2']
-    dir==4 && return @tensor A[a0,a1,a2,a3,s] := A[a0,a1,a2,a3',s] * C[a3,a3']
-    throw("invalid argument dir=$dir")
+function contractC!(A::CuArray{T1,5}, C::CuArray{T2,2}, dir::Int) where {T1,T2}
+    local A_new
+    if dir==1
+        A_new = @tensor A[a0,a1,a2,a3,s] := A[a0',a1,a2,a3,s] * C[a0,a0']
+    elseif dir==2
+        A_new = @tensor A[a0,a1,a2,a3,s] := A[a0,a1',a2,a3,s] * C[a1,a1']
+    elseif dir==3
+        A_new = @tensor A[a0,a1,a2,a3,s] := A[a0,a1,a2',a3,s] * C[a2,a2']
+    elseif dir==4
+        A_new = @tensor A[a0,a1,a2,a3,s] := A[a0,a1,a2,a3',s] * C[a3,a3']
+    else
+        throw("invalid argument dir=$dir")
+    end
+    return A_new
 end
-#EDIT
-function contractC!(A::Union{CuArray{T1,6},Array{T1,6}}, C::Union{Array{T2,2},CuArray{T2,2}}, dir::Int) where {T1,T2}
-    dir==1 && return @tensor A[a0,a1,a2,a3,a4,s] := A[a0',a1,a2,a3,a4,s] * C[a0,a0']
-    dir==2 && return @tensor A[a0,a1,a2,a3,a4,s] := A[a0,a1',a2,a3,a4,s] * C[a1,a1']
-    dir==3 && return @tensor A[a0,a1,a2,a3,a4,s] := A[a0,a1,a2',a3,a4,s] * C[a2,a2']
-    dir==4 && return @tensor A[a0,a1,a2,a3,a4,s] := A[a0,a1,a2,a3',a4,s] * C[a3,a3']
-    dir==5 && return @tensor A[a0,a1,a2,a3,a4,s] := A[a0,a1,a2,a3,a4',s] * C[a4,a4']
-    throw("invalid argument dir=$dir")
+function contractC!(A::CuArray{T1,6}, C::CuArray{T2,2}, dir::Int) where {T1,T2}
+    local A_new
+    if dir==1
+        A_new = @tensor A[a0,a1,a2,a3,a4,s] := A[a0',a1,a2,a3,a4,s] * C[a0,a0']
+    elseif dir==2
+        A_new = @tensor A[a0,a1,a2,a3,a4,s] := A[a0,a1',a2,a3,a4,s] * C[a1,a1']
+    elseif dir==3
+        A_new = @tensor A[a0,a1,a2,a3,a4,s] := A[a0,a1,a2',a3,a4,s] * C[a2,a2']
+    elseif dir==4
+        A_new = @tensor A[a0,a1,a2,a3,a4,s] := A[a0,a1,a2,a3',a4,s] * C[a3,a3']
+    elseif dir==5
+        A_new = @tensor A[a0,a1,a2,a3,a4,s] := A[a0,a1,a2,a3,a4',s] * C[a4,a4']
+    else
+        throw("invalid argument dir=$dir")
+    end
+    return A_new
 end
 
-function rhoAAstar(ρ::Union{CuArray{T1,2},Array{T1,2}}, A::Union{CuArray{T2,2},Array{T2,2}}, indir::Int) where {T1,T2}
-    @tensoropt ρO = tensorscalar(ρ[a0,b0] * conj(A)[a0,s] * A[b0,s])
+function rhoAAstar(ρ::CuArray{T1,2}, A::CuArray{T2,2}, indir::Int) where {T1,T2}
+    @tensor ρO = tensorscalar(ρ[a0,b0] * conj(A[a0,s]) * A[b0,s])
 end
-function rhoAAstar(ρ::Union{CuArray{T1,3},Array{T1,2}}, A::Union{CuArray{T2,2},Array{T2,2}}) where {T1,T2}
-    @tensoropt ρO = tensorscalar(ρ[a0,b0] * conj(A[a0,s]) * A[b0,s])
+function rhoAAstar(ρ::CuArray{T1,2}, A::CuArray{T2,2}) where {T1,T2}
+    @tensor ρO = tensorscalar(ρ[a0,b0] * conj(A[a0,s]) * A[b0,s])
 end
-function rhoAAstar(ρ::Union{CuArray{T1,2},Array{T1,2}}, A::Union{CuArray{T2,3},Array{T2,3}}, indir::Int, outdir::Int) where {T1,T2}
-    indir==1 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[a0,a,s]) * A[b0,b,s]
-    indir==2 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[a,a0,s]) * A[b,b0,s]
+function rhoAAstar(ρ::CuArray{T1,2}, A::CuArray{T2,3}, indir::Int, outdir::Int) where {T1,T2}
+    indir==1 && return @tensor ρO[a,b] := ρ[a0,b0] * conj(A[a0,a,s]) * A[b0,b,s]
+    indir==2 && return @tensor ρO[a,b] := ρ[a0,b0] * conj(A[a,a0,s]) * A[b,b0,s]
     throw("invalid arguments indir=$indir, outdir=$outdir")
 end
-function rhoAAstar(ρ::Union{CuArray{T1,2},Array{T1,2}}, A::Union{CuArray{T2,3},Array{T2,3}}) where {T1,T2}
-    return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[a0,a,s]) * A[b0,b,s]
+function rhoAAstar(ρ::CuArray{T1,2}, A::CuArray{T2,3}) where {T1,T2}
+    @tensor ρO[a,b] := ρ[a0,b0] * conj(A[a0,a,s]) * A[b0,b,s]
+end
+function rhoABstar(ρ::CuArray{T1,2}, A::CuArray{T2,2}, B::CuArray{T3,2}) where {T1,T2,T3}
+    @tensor ρO = tensorscalar(ρ[a0,b0] * conj(B[a0,s]) * A[b0,s])
+end
+function rhoABstar(ρ::CuArray{T1,2}, A::CuArray{T2,3}, B::CuArray{T3,3}) where {T1,T2,T3}
+    @tensor ρO[a,b] := ρ[a0,b0] * conj(B[a0,a,s]) * A[b0,b,s]
 end
 
-function rhoAAstar(ρ::Union{CuArray{T1,2},Array{T1,2}}, A::Union{CuArray{T2,4},Array{T2,4}}, indir::Int, outdir::Int) where {T1,T2}
-    indir==1 && outdir==2 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[a0,a,c0,s]) * A[b0,b,c0,s]
-    indir==1 && outdir==3 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[a0,c0,a,s]) * A[b0,c0,b,s]
+function rhoAAstar(ρ::CuArray{T1,2}, A::CuArray{T2,4}, indir::Int, outdir::Int) where {T1,T2}
+    indir==1 && outdir==2 && return @tensor opt=true ρO[a,b] := ρ[a0,b0] * conj(A[a0,a,c0,s]) * A[b0,b,c0,s]
+    indir==1 && outdir==3 && return @tensor opt=true ρO[a,b] := ρ[a0,b0] * conj(A[a0,c0,a,s]) * A[b0,c0,b,s]
 
-    indir==2 && outdir==1 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[a,a0,c0,s]) * A[b,b0,c0,s]
-    indir==2 && outdir==3 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[c0,a0,a,s]) * A[c0,b0,b,s]
+    indir==2 && outdir==1 && return @tensor opt=true ρO[a,b] := ρ[a0,b0] * conj(A[a,a0,c0,s]) * A[b,b0,c0,s]
+    indir==2 && outdir==3 && return @tensor opt=true ρO[a,b] := ρ[a0,b0] * conj(A[c0,a0,a,s]) * A[c0,b0,b,s]
 
-    indir==3 && outdir==1 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[a,c0,a0,s]) * A[b,c0,b0,s]
-    indir==3 && outdir==2 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[c0,a,a0,s]) * A[c0,b,b0,s]
+    indir==3 && outdir==1 && return @tensor opt=true ρO[a,b] := ρ[a0,b0] * conj(A[a,c0,a0,s]) * A[b,c0,b0,s]
+    indir==3 && outdir==2 && return @tensor opt=true ρO[a,b] := ρ[a0,b0] * conj(A[c0,a,a0,s]) * A[c0,b,b0,s]
     throw("invalid arguments indir=$indir, outdir=$outdir")
 end
-function rhoAAstar(ρ::Union{CuArray{T1,2},Array{T1,2}}, A::Union{CuArray{T2,5},Array{T2,5}}, indir::Int, outdir::Int) where {T1,T2}
-    indir==1 && outdir==2 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[a0,a,c0,c1,s]) * A[b0,b,c0,c1,s]
-    indir==1 && outdir==3 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[a0,c0,a,c1,s]) * A[b0,c0,b,c1,s]
-    indir==1 && outdir==4 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[a0,c0,c1,a,s]) * A[b0,c0,c1,b,s]
+function rhoAAstar(ρ::CuArray{T1,2}, A::CuArray{T2,5}, indir::Int, outdir::Int) where {T1,T2}
+    indir==1 && outdir==2 && return @tensor ρO[a,b] := ρ[a0,b0] * conj(A[a0,a,c0,c1,s]) * A[b0,b,c0,c1,s]
+    indir==1 && outdir==3 && return @tensor opt=true ρO[a,b] := ρ[a0,b0] * conj(A[a0,c0,a,c1,s]) * A[b0,c0,b,c1,s]
+    indir==1 && outdir==4 && return @tensor opt=true ρO[a,b] := ρ[a0,b0] * conj(A[a0,c0,c1,a,s]) * A[b0,c0,c1,b,s]
 
-    indir==2 && outdir==1 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[a,a0,c0,c1,s]) * A[b,b0,c0,c1,s]
-    indir==2 && outdir==3 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[c0,a0,a,c1,s]) * A[c0,b0,b,c1,s]
-    indir==2 && outdir==4 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[c0,a0,c1,a,s]) * A[c0,b0,c1,b,s]
+    indir==2 && outdir==1 && return @tensor opt=true ρO[a,b] := ρ[a0,b0] * conj(A[a,a0,c0,c1,s]) * A[b,b0,c0,c1,s]
+    indir==2 && outdir==3 && return @tensor opt=true ρO[a,b] := ρ[a0,b0] * conj(A[c0,a0,a,c1,s]) * A[c0,b0,b,c1,s]
+    indir==2 && outdir==4 && return @tensor opt=true ρO[a,b] := ρ[a0,b0] * conj(A[c0,a0,c1,a,s]) * A[c0,b0,c1,b,s]
 
-    indir==3 && outdir==1 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[a,c0,a0,c1,s]) * A[b,c0,b0,c1,s]
-    indir==3 && outdir==2 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[c0,a,a0,c1,s]) * A[c0,b,b0,c1,s]
-    indir==3 && outdir==4 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[c0,c1,a0,a,s]) * A[c0,c1,b0,b,s]
+    indir==3 && outdir==1 && return @tensor opt=true ρO[a,b] := ρ[a0,b0] * conj(A[a,c0,a0,c1,s]) * A[b,c0,b0,c1,s]
+    indir==3 && outdir==2 && return @tensor opt=true ρO[a,b] := ρ[a0,b0] * conj(A[c0,a,a0,c1,s]) * A[c0,b,b0,c1,s]
+    indir==3 && outdir==4 && return @tensor opt=true ρO[a,b] := ρ[a0,b0] * conj(A[c0,c1,a0,a,s]) * A[c0,c1,b0,b,s]
 
-    indir==4 && outdir==1 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[a,c0,c1,a0,s]) * A[b,c0,c1,b0,s]
-    indir==4 && outdir==2 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[c0,a,c1,a0,s]) * A[c0,b,c1,b0,s]
-    indir==4 && outdir==3 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[c0,c1,a,a0,s]) * A[c0,c1,b,b0,s]
+    indir==4 && outdir==1 && return @tensor opt=true ρO[a,b] := ρ[a0,b0] * conj(A[a,c0,c1,a0,s]) * A[b,c0,c1,b0,s]
+    indir==4 && outdir==2 && return @tensor opt=true ρO[a,b] := ρ[a0,b0] * conj(A[c0,a,c1,a0,s]) * A[c0,b,c1,b0,s]
+    indir==4 && outdir==3 && return @tensor opt=true ρO[a,b] := ρ[a0,b0] * conj(A[c0,c1,a,a0,s]) * A[c0,c1,b,b0,s]
     throw("invalid arguments indir=$indir, outdir=$outdir")
 end
 
-#EDIT
-function rhoAOAstar(ρ::Union{Array{T1,2},CuArray{T1,2}}, A::Union{Array{T2,2},CuArray{T2,2}}, O::Union{Array{T3,2},CuArray{T3,2}}, indir::Int, ::Nothing) where {T1,T2,T3}
-    @tensoropt ρO = tensorscalar(ρ[a0,b0] * CuArray{ComplexF64}(conj(A))[a0,s'] * CuArray{ComplexF64}(O)[s',s] * CuArray{ComplexF64}(A)[b0,s])
+function rhoAOAstar(ρ::CuArray{T1,2}, A::CuArray{T2,2}, O::AbstractArray{T3,2}, indir::Int, ::Nothing) where {T1,T2,T3}
+    @tensor ρO = tensorscalar(ρ[a0,b0] * conj(A[a0,s']) * O[s',s] * A[b0,s])
 end
-#EDIT
-function rhoAOAstar(ρ::Union{Array{T1,2},CuArray{T1,2}}, A::Union{Array{T2,2},CuArray{T2,2}}, O::Union{Array{T3,2},CuArray{T3,2}}, ::Nothing) where {T1,T2,T3}
-    @tensoropt ρO = tensorscalar(ρ[a0,b0] * CuArray{ComplexF64}(conj(A))[a0,s'] * CuArray{ComplexF64}(O)[s',s] * CuArray{ComplexF64}(A)[b0,s])
+function rhoAOAstar(ρ::CuArray{T1,2}, A::CuArray{T2,2}, O::AbstractArray{T3,2}, ::Nothing) where {T1,T2,T3}
+    @tensor ρO = tensorscalar(ρ[a0,b0] * conj(A[a0,s']) * O[s',s] * A[b0,s])
 end
-#EDIT
-function rhoAOAstar(ρ::Union{Array{T1,2},CuArray{T1,2}}, A::Union{CuArray{T2,3},Array{T2,3}}, O::Union{Array{T3,2},CuArray{T3,2}}, indir::Int, ::Nothing) where {T1,T2,T3}
-    indir==1 && return @tensoropt ρO = tensorscalar(ρ[a0,b0] * CuArray{ComplexF64}(conj(A))[a0,c0,s'] * CuArray{ComplexF64}(O)[s',s] * CuArray{ComplexF64}(A)[b0,c0,s])
-    indir==2 && return @tensoropt ρO = tensorscalar(ρ[a0,b0] * CuArray{ComplexF64}(conj(A))[c0,a0,s'] * CuArray{ComplexF64}(O)[s',s] * CuArray{ComplexF64}(A)[c0,b0,s])
+function rhoAOAstar(ρ::CuArray{T1,2}, A::CuArray{T2,3}, O::AbstractArray{T3,2}, indir::Int, ::Nothing) where {T1,T2,T3}
+    indir==1 && return @tensor ρO = tensorscalar(ρ[a0,b0] * conj(A[a0,c0,s']) * O[s',s] * A[b0,c0,s])
+    indir==2 && return @tensor ρO = tensorscalar(ρ[a0,b0] * conj(A[c0,a0,s']) * O[s',s] * A[c0,b0,s])
 end
-#EDIT
-function rhoAOAstar(ρ::Union{Array{T1,2},CuArray{T1,2}}, A::Union{CuArray{T2,3},Array{T2,3}}, O::Union{Array{T3,2},CuArray{T3,2}}, ::Nothing) where {T1,T2,T3}
-    return @tensoropt ρO = tensorscalar(ρ[a0,b0] * conj(A)[a0,c0,s'] * O[s',s] * A[b0,c0,s])
+function rhoAOAstar(ρ::CuArray{T1,2}, A::CuArray{T2,3}, O::AbstractArray{T3,2}, ::Nothing) where {T1,T2,T3}
+    @tensor ρO = tensorscalar(ρ[a0,b0] * conj(A[a0,c0,s']) * O[s',s] * A[b0,c0,s])
 end
 
-#EDIT
-function rhoAOAstar(ρ::Union{Array{T1,2},CuArray{T1,2}}, A::Union{CuArray{T2,4},Array{T2,4}}, O::Union{Array{T3,2},CuArray{T3,2}}, indir::Int, ::Nothing) where {T1,T2,T3}
-    indir==1 && return @tensoropt ρO = tensorscalar(ρ[a0,b0] * conj(A[a0,c0,c1,s']) * O[s',s] * A[b0,c0,c1,s])
-    indir==2 && return @tensoropt ρO = tensorscalar(ρ[a0,b0] * conj(A[c0,a0,c1,s']) * O[s',s] * A[c0,b0,c1,s])
-    indir==3 && return @tensoropt ρO = tensorscalar(ρ[a0,b0] * conj(A[c0,c1,a0,s']) * O[s',s] * A[c0,c1,b0,s])
+function rhoAOAstar(ρ::CuArray{T1,2}, A::CuArray{T2,4}, O::AbstractArray{T3,2}, indir::Int, ::Nothing) where {T1,T2,T3}
+    indir==1 && return @tensor ρO = tensorscalar(ρ[a0,b0] * conj(A[a0,c0,c1,s']) * O[s',s] * A[b0,c0,c1,s])
+    indir==2 && return @tensor ρO = tensorscalar(ρ[a0,b0] * conj(A[c0,a0,c1,s']) * O[s',s] * A[c0,b0,c1,s])
+    indir==3 && return @tensor ρO = tensorscalar(ρ[a0,b0] * conj(A[c0,c1,a0,s']) * O[s',s] * A[c0,c1,b0,s])
 end
-#EDIT
-function rhoAOAstar(ρ::Union{Array{T1,2},CuArray{T1,2}}, A::Union{Array{T2,5},CuArray{T2,5}}, O::Union{Array{T3,2},CuArray{T3,2}}, indir::Int, ::Nothing) where {T1,T2,T3}
-#EDIT
-    indir==1 && return @tensoropt ρO = tensorscalar(CuArray(ρ)[a0,b0] * CuArray(conj(A))[a0,c0,c1,c2,s'] * CuArray(O)[s',s] * CuArray(A)[b0,c0,c1,c2,s])
-    indir==2 && return @tensoropt ρO = tensorscalar(ρ[a0,b0] * conj(A[c0,a0,c1,c2,s']) * O[s',s] * A[c0,b0,c1,c2,s])
-    indir==3 && return @tensoropt ρO = tensorscalar(ρ[a0,b0] * conj(A[c0,c1,a0,c2,s']) * O[s',s] * A[c0,c1,b0,c2,s])
-    indir==4 && return @tensoropt ρO = tensorscalar(ρ[a0,b0] * conj(A[c0,c1,c2,a0,s']) * O[s',s] * A[c0,c1,c2,b0,s])
+function rhoAOAstar(ρ::CuArray{T1,2}, A::CuArray{T2,5}, O::AbstractArray{T3,2}, indir::Int, ::Nothing) where {T1,T2,T3}
+    indir==1 && return @tensor ρO = tensorscalar(ρ[a0,b0] * conj(A[a0,c0,c1,c2,s']) * O[s',s] * A[b0,c0,c1,c2,s])
+    indir==2 && return @tensor ρO = tensorscalar(ρ[a0,b0] * conj(A[c0,a0,c1,c2,s']) * O[s',s] * A[c0,b0,c1,c2,s])
+    indir==3 && return @tensor ρO = tensorscalar(ρ[a0,b0] * conj(A[c0,c1,a0,c2,s']) * O[s',s] * A[c0,c1,b0,c2,s])
+    indir==4 && return @tensor ρO = tensorscalar(ρ[a0,b0] * conj(A[c0,c1,c2,a0,s']) * O[s',s] * A[c0,c1,c2,b0,s])
 end
 
-#EDIT
-function rhoAOAstar(ρ::Union{Array{T1,2},CuArray{T1,2}}, A::Union{CuArray{T2,3},Array{T2,3}}, O::Union{Array{T3,2},CuArray{T3,2}}, indir::Int, outdir::Int) where {T1,T2,T3}
-    indir==1 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[a0,a,s']) * O[s',s] * A[b0,b,s]
-    indir==2 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[a,a0,s']) * O[s',s] * A[b,b0,s]
+function rhoAOAstar(ρ::CuArray{T1,2}, A::CuArray{T2,3}, O::AbstractArray{T3,2}, indir::Int, outdir::Int) where {T1,T2,T3}
+    indir==1 && return @tensor ρO[a,b] := ρ[a0,b0] * conj(A[a0,a,s']) * O[s',s] * A[b0,b,s]
+    indir==2 && return @tensor ρO[a,b] := ρ[a0,b0] * conj(A[a,a0,s']) * O[s',s] * A[b,b0,s]
     throw("invalid arguments indir=$indir, outdir=$outdir")
 end
-#EDIT
-function rhoAOAstar(ρ::Union{Array{T1,2},CuArray{T1,2}}, A::Union{CuArray{T2,3},Array{T2,3}}, O::Union{Array{T3,2},CuArray{T3,2}}) where {T1,T2,T3}
-    return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[a0,a,s']) * O[s',s] * A[b0,b,s]
+function rhoAOAstar(ρ::CuArray{T1,2}, A::CuArray{T2,3}, O::AbstractArray{T3,2}) where {T1,T2,T3}
+    @tensor ρO[a,b] := ρ[a0,b0] * conj(A[a0,a,s']) * O[s',s] * A[b0,b,s]
 end
 
-#EDIT
-function rhoAOAstar(ρ::Union{Array{T1,2},CuArray{T1,2}}, A::Union{CuArray{T2,4},Array{T2,4}}, O::Union{Array{T3,2},CuArray{T3,2}}, indir::Int, outdir::Int) where {T1,T2,T3}
-    indir==1 && outdir==2 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[a0,a,c0,s']) * O[s',s] * A[b0,b,c0,s]
-    indir==1 && outdir==3 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[a0,c0,a,s']) * O[s',s] * A[b0,c0,b,s]
+function rhoAOAstar(ρ::CuArray{T1,2}, A::CuArray{T2,4}, O::AbstractArray{T3,2}, indir::Int, outdir::Int) where {T1,T2,T3}
+    indir==1 && outdir==2 && return @tensor ρO[a,b] := ρ[a0,b0] * conj(A[a0,a,c0,s']) * O[s',s] * A[b0,b,c0,s]
+    indir==1 && outdir==3 && return @tensor ρO[a,b] := ρ[a0,b0] * conj(A[a0,c0,a,s']) * O[s',s] * A[b0,c0,b,s]
 
-    indir==2 && outdir==1 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[a,a0,c0,s']) * O[s',s] * A[b,b0,c0,s]
-    indir==2 && outdir==3 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[c0,a0,a,s']) * O[s',s] * A[c0,b0,b,s]
+    indir==2 && outdir==1 && return @tensor ρO[a,b] := ρ[a0,b0] * conj(A[a,a0,c0,s']) * O[s',s] * A[b,b0,c0,s]
+    indir==2 && outdir==3 && return @tensor ρO[a,b] := ρ[a0,b0] * conj(A[c0,a0,a,s']) * O[s',s] * A[c0,b0,b,s]
 
-    indir==3 && outdir==1 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[a,c0,a0,s']) * O[s',s] * A[b,c0,b0,s]
-    indir==3 && outdir==2 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[c0,a,a0,s']) * O[s',s] * A[c0,b,b0,s]
+    indir==3 && outdir==1 && return @tensor ρO[a,b] := ρ[a0,b0] * conj(A[a,c0,a0,s']) * O[s',s] * A[b,c0,b0,s]
+    indir==3 && outdir==2 && return @tensor ρO[a,b] := ρ[a0,b0] * conj(A[c0,a,a0,s']) * O[s',s] * A[c0,b,b0,s]
     throw("invalid arguments indir=$indir, outdir=$outdir")
 end
-#EDIT
-function rhoAOAstar(ρ::Union{Array{T1,2},CuArray{T1,2}}, A::Union{CuArray{T2,5},Array{T2,5}}, O::Union{Array{T3,2},CuArray{T3,2}}, indir::Int, outdir::Int) where {T1,T2,T3}
-    indir==1 && outdir==2 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[a0,a,c0,c1,s']) * O[s',s] * A[b0,b,c0,c1,s]
-    indir==1 && outdir==3 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[a0,c0,a,c1,s']) * O[s',s] * A[b0,c0,b,c1,s]
-    indir==1 && outdir==4 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[a0,c0,c1,a,s']) * O[s',s] * A[b0,c0,c1,b,s]
+function rhoAOAstar(ρ::CuArray{T1,2}, A::CuArray{T2,5}, O::AbstractArray{T3,2}, indir::Int, outdir::Int) where {T1,T2,T3}
+    indir==1 && outdir==2 && return @tensor ρO[a,b] := ρ[a0,b0] * conj(A[a0,a,c0,c1,s']) * O[s',s] * A[b0,b,c0,c1,s]
+    indir==1 && outdir==3 && return @tensor ρO[a,b] := ρ[a0,b0] * conj(A[a0,c0,a,c1,s']) * O[s',s] * A[b0,c0,b,c1,s]
+    indir==1 && outdir==4 && return @tensor ρO[a,b] := ρ[a0,b0] * conj(A[a0,c0,c1,a,s']) * O[s',s] * A[b0,c0,c1,b,s]
 
-    indir==2 && outdir==1 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[a,a0,c0,c1,s']) * O[s',s] * A[b,b0,c0,c1,s]
-    indir==2 && outdir==3 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[c0,a0,a,c1,s']) * O[s',s] * A[c0,b0,b,c1,s]
-    indir==2 && outdir==4 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[c0,a0,c1,a,s']) * O[s',s] * A[c0,b0,c1,b,s]
+    indir==2 && outdir==1 && return @tensor ρO[a,b] := ρ[a0,b0] * conj(A[a,a0,c0,c1,s']) * O[s',s] * A[b,b0,c0,c1,s]
+    indir==2 && outdir==3 && return @tensor ρO[a,b] := ρ[a0,b0] * conj(A[c0,a0,a,c1,s']) * O[s',s] * A[c0,b0,b,c1,s]
+    indir==2 && outdir==4 && return @tensor ρO[a,b] := ρ[a0,b0] * conj(A[c0,a0,c1,a,s']) * O[s',s] * A[c0,b0,c1,b,s]
 
-    indir==3 && outdir==1 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[a,c0,a0,c1,s']) * O[s',s] * A[b,c0,b0,c1,s]
-    indir==3 && outdir==2 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[c0,a,a0,c1,s']) * O[s',s] * A[c0,b,b0,c1,s]
-    indir==3 && outdir==4 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[c0,c1,a0,a,s']) * O[s',s] * A[c0,c1,b0,b,s]
+    indir==3 && outdir==1 && return @tensor ρO[a,b] := ρ[a0,b0] * conj(A[a,c0,a0,c1,s']) * O[s',s] * A[b,c0,b0,c1,s]
+    indir==3 && outdir==2 && return @tensor ρO[a,b] := ρ[a0,b0] * conj(A[c0,a,a0,c1,s']) * O[s',s] * A[c0,b,b0,c1,s]
+    indir==3 && outdir==4 && return @tensor ρO[a,b] := ρ[a0,b0] * conj(A[c0,c1,a0,a,s']) * O[s',s] * A[c0,c1,b0,b,s]
 
-    indir==4 && outdir==1 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[a,c0,c1,a0,s']) * O[s',s] * A[b,c0,c1,b0,s]
-    indir==4 && outdir==2 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[c0,a,c1,a0,s']) * O[s',s] * A[c0,b,c1,b0,s]
-    indir==4 && outdir==3 && return @tensoropt ρO[a,b] := ρ[a0,b0] * conj(A[c0,c1,a,a0,s']) * O[s',s] * A[c0,c1,b,b0,s]
+    indir==4 && outdir==1 && return @tensor ρO[a,b] := ρ[a0,b0] * conj(A[a,c0,c1,a0,s']) * O[s',s] * A[b,c0,c1,b0,s]
+    indir==4 && outdir==2 && return @tensor ρO[a,b] := ρ[a0,b0] * conj(A[c0,a,c1,a0,s']) * O[s',s] * A[c0,b,c1,b0,s]
+    indir==4 && outdir==3 && return @tensor ρO[a,b] := ρ[a0,b0] * conj(A[c0,c1,a,a0,s']) * O[s',s] * A[c0,c1,b,b0,s]
     throw("invalid arguments indir=$indir, outdir=$outdir")
 end
 
@@ -208,43 +245,51 @@ end
 #Fs must be given in the correct order
 #left = direction of parent
 #right = direction of children
-function updateleftenv(A::Union{CuArray{T1,2},Array{T1,2}}, M::Union{CuArray{T2,3},Array{T2,3}}, dir::Int) where {T1,T2}
+function updateleftenv(A::CuArray{T1,2}, M::CuArray{T2,3}, dir::Int) where {T1,T2}
     @tensor F[a,b,c] := conj(A[a,s'])*M[b,s',s]*A[c,s]
+    return F
 end
-function updaterightenv(A::Union{CuArray{T1,2},Array{T1,2}}, M::Union{CuArray{T2,3},Array{T2,3}}) where {T1,T2}
+function updaterightenv(A::CuArray{T1,2}, M::CuArray{T2,3}) where {T1,T2}
     @tensor F[a,b,c] := conj(A[a,s'])*M[b,s',s]*A[c,s]
+    return F
 end
-function updateleftenv(A::Union{CuArray{T1,3},Array{T1,3}}, M::Union{CuArray{T2,4},Array{T2,4}}, FL) where {T1,T2}
+function updateleftenv(A::CuArray{T1,3}, M::CuArray{T2,4}, FL) where {T1,T2}
     @tensor F[a,b,c] := FL[a0,b0,c0]*conj(A[a0,a,s'])*M[b0,b,s',s]*A[c0,c,s]
+    return F
 end
-function updateleftenv(A::Union{CuArray{T1,3},Array{T1,3}}, M::Union{CuArray{T2,4},Array{T2,4}}, dir::Int, F0) where {T1,T2}
+function updateleftenv(A::CuArray{T1,3}, M::CuArray{T2,4}, dir::Int, F0) where {T1,T2}
     @tensor F[a,b,c] := F0[a0,b0,c0]*conj(A[a0,a,s'])*M[b0,b,s',s]*A[c0,c,s]
+    return F
 end
-function updaterightenv(A::Union{CuArray{T1,3},Array{T1,3}}, M::Array{T2,4}, FR) where {T1,T2}
+function updaterightenv(A::CuArray{T1,3}, M::CuArray{T2,4}, FR) where {T1,T2}
     @tensor F[a,b,c] := FR[a0,b0,c0]*conj(A[a,a0,s'])*M[b,b0,s',s]*A[c,c0,s]
+    return F
 end
 
-function updateleftenv(A::Union{CuArray{T1,4},Array{T1,4}}, M::Union{CuArray{T2,5},Array{T2,5}}, dir::Int, F0, F1) where {T1,T2} # dir in {1,2}
+function updateleftenv(A::CuArray{T1,4}, M::CuArray{T2,5}, dir::Int, F0, F1) where {T1,T2}
     dir==1 && (Aperm = [1,3,2,4]; Mperm = [1,3,2,4,5])
     dir==2 && (Aperm = [1,2,3,4]; Mperm = [1,2,3,4,5])
     At = permutedims(A, Aperm)
     Mt = permutedims(M, Mperm)
-    @tensoropt F[a,b,c] := F0[a0,b0,c0]*F1[a1,b1,c1]*conj(At[a0,a1,a,s'])*Mt[b0,b1,b,s',s]*At[c0,c1,c,s]
+    @tensor opt = true F[a,b,c] := F0[a0,b0,c0]*F1[a1,b1,c1]*conj(At[a0,a1,a,s'])*Mt[b0,b1,b,s',s]*At[c0,c1,c,s]
+    return F
 end
-function updaterightenv(A::Union{CuArray{T1,4},Array{T1,4}}, M::Union{CuArray{T2,5},Array{T2,5}}, F1, F2) where {T1,T2}
-    @tensoropt F[a,b,c] := F1[a1,b1,c1]*F2[a2,b2,c2]*conj(A[a,a1,a2,s'])*M[b,b1,b2,s',s]*A[c,c1,c2,s]
+function updaterightenv(A::CuArray{T1,4}, M::CuArray{T2,5}, F1, F2) where {T1,T2}
+    @tensor opt=true F[a,b,c] := F1[a1,b1,c1]*F2[a2,b2,c2]*conj(A[a,a1,a2,s'])*M[b,b1,b2,s',s]*A[c,c1,c2,s]
+    return F
 end
-function updateleftenv(A::Union{CuArray{T1,5},Array{T1,5}}, M::Union{CuArray{T2,6},Array{T2,6}}, dir::Int, F0, F1, F2) where {T1,T2} # dir in {1,2,3}
+function updateleftenv(A::CuArray{T1,5}, M::CuArray{T2,6}, dir::Int, F0, F1, F2) where {T1,T2}
     dir==1 && (Aperm = [1,3,4,2,5]; Mperm = [1,3,4,2,5,6])
     dir==2 && (Aperm = [1,2,4,3,5]; Mperm = [1,2,4,3,5,6])
     dir==3 && (Aperm = [1,2,3,4,5]; Mperm = [1,2,3,4,5,6])
     At = permutedims(A, Aperm)
-    Mt = ComplexF64.(permutedims(M, Mperm))
-    #EDIT
-    @tensoropt F[a,b,c] := ComplexF64.(F0)[a0,b0,c0]*F1[a1,b1,c1]*F2[a2,b2,c2]*conj(At[a0,a1,a2,a,s'])*Mt[b0,b1,b2,b,s',s]*At[c0,c1,c2,c,s]
+    Mt = permutedims(M, Mperm)
+    @tensor opt=true F[a,b,c] := F0[a0,b0,c0]*F1[a1,b1,c1]*F2[a2,b2,c2]*conj(At[a0,a1,a2,a,s'])*Mt[b0,b1,b2,b,s',s]*At[c0,c1,c2,c,s]
+    return F
 end
-function updaterightenv(A::Union{CuArray{T1,5},Array{T1,5}}, M::Union{CuArray{T2,6},Array{T2,6}}, F1, F2, F3) where {T1,T2}
-    @tensoropt F[a,b,c] := F1[a1,b1,c1]*F2[a2,b2,c2]*F3[a3,b3,c3]*conj(A[a,a1,a2,a3,s'])*M[b,b1,b2,b3,s',s]*A[c,c1,c2,c3,s]
+function updaterightenv(A::CuArray{T1,5}, M::CuArray{T2,6}, F1, F2, F3) where {T1,T2}
+    @tensor opt=true F[a,b,c] := F1[a1,b1,c1]*F2[a2,b2,c2]*F3[a3,b3,c3]*conj(A[a,a1,a2,a3,s'])*M[b,b1,b2,b3,s',s]*A[c,c1,c2,c3,s]
+    return F
 end
 
 #dir gives the open index, where dir=1 is the parent
@@ -280,51 +325,58 @@ function updateenv(A, M, dir, F1, F2, F3, F4)
 end
 function updateenv1(A, M, F1)
     @tensor F[a,b,c] := F1[a1,b1,c1]*conj(A[a,a1,s'])*M[b,b1,s',s]*A[c,c1,s]
+    return F
 end
 function updateenv2(A, M, F1)
     @tensor F[a,b,c] := F1[a1,b1,c1]*conj(A[a1,a,s'])*M[b1,b,s',s]*A[c1,c,s]
+    return F
 end
 function updateenv1(A, M, F1, F2)
     @tensor F[a,b,c] := F1[a1,b1,c1]*F2[a2,b2,c2]*conj(A[a,a1,a2,s'])*M[b,b1,b2,s',s]*A[c,c1,c2,s]
+    return F
 end
 function updateenv2(A, M, F1, F2)
     @tensor F[a,b,c] := F1[a1,b1,c1]*F2[a2,b2,c2]*conj(A[a1,a,a2,s'])*M[b1,b,b2,s',s]*A[c1,c,c2,s]
+    return F
 end
 function updateenv3(A, M, F1, F2)
     @tensor F[a,b,c] := F1[a1,b1,c1]*F2[a2,b2,c2]*conj(A[a1,a2,a,s'])*M[b1,b2,b,s',s]*A[c1,c2,c,s]
+    return F
 end
 function updateenv1(A, M, F1, F2, F3)
     @tensor F[a,b,c] := F1[a1,b1,c1]*F2[a2,b2,c2]*F3[a3,b3,c3]*conj(A[a,a1,a2,a3,s'])*M[b,b1,b2,b3,s',s]*A[c,c1,c2,c3,s]
+    return F
 end
 function updateenv2(A, M, F1, F2, F3)
     @tensor F[a,b,c] := F1[a1,b1,c1]*F2[a2,b2,c2]*F3[a3,b3,c3]*conj(A[a1,a,a2,a3,s'])*M[b1,b,b2,b3,s',s]*A[c1,c,c2,c3,s]
+    return F
 end
 function updateenv3(A, M, F1, F2, F3)
     @tensor F[a,b,c] := F1[a1,b1,c1]*F2[a2,b2,c2]*F3[a3,b3,c3]*conj(A[a1,a2,a,a3,s'])*M[b1,b2,b,b3,s',s]*A[c1,c2,c,c3,s]
+    return F
 end
 function updateenv4(A, M, F1, F2, F3)
     @tensor F[a,b,c] := F1[a1,b1,c1]*F2[a2,b2,c2]*F3[a3,b3,c3]*conj(A[a1,a2,a3,a,s'])*M[b1,b2,b3,b,s',s]*A[c1,c2,c3,c,s]
+    return F
 end
 
 function applyH2(AA, H1, H2, F1, F2)
-    @tensoropt HAA[a1,s1,a2,s2] := F1[a1,b1,c1]*AA[c1,s1',c2,s2']*H1[b1,b,s1,s1']*H2[b,b2,s2,s2']*F2[a2,b2,c2]
-#    @tensoropt HAA[a1,s1,a2,s2] := F1[a1,b1,c1]*AA[c1,s1',c2,s2']*H1[b1,b,s1,s1']*H2[b,b2,s2,s2']*F2[a2,b2,c2]
+    return @tensor opt=true HAA[a1,s1,a2,s2] := F1[a1,b1,c1]*AA[c1,s1',c2,s2']*H1[b1,b,s1,s1']*H2[b,b2,s2,s2']*F2[a2,b2,c2]
 end
 function applyH1(AC, M, F)
-    @tensoropt HAC[a,s'] := F[a,b,c]*AC[c,s]*M[b,s',s]
+    return @tensor opt=true HAC[a,s'] := F[a,b,c]*AC[c,s]*M[b,s',s]
 end
 function applyH1(AC, M, F0, F1)
-    @tensoropt HAC[a0,a1,s'] := F0[a0,b0,c0]*F1[a1,b1,c1]*AC[c0,c1,s]*M[b0,b1,s',s]
+    return @tensor opt=true HAC[a0,a1,s'] := F0[a0,b0,c0]*F1[a1,b1,c1]*AC[c0,c1,s]*M[b0,b1,s',s]
 end
 function applyH1(AC, M, F0, F1, F2)
-    @tensoropt HAC[a0,a1,a2,s'] := F0[a0,b0,c0]*F1[a1,b1,c1]*F2[a2,b2,c2]*AC[c0,c1,c2,s]*M[b0,b1,b2,s',s]
+    return @tensor opt=true HAC[a0,a1,a2,s'] := F0[a0,b0,c0]*F1[a1,b1,c1]*F2[a2,b2,c2]*AC[c0,c1,c2,s]*M[b0,b1,b2,s',s]
 end
-function applyH1(AC, M, F0, F1, F2, F3) 
-    #EDIT
-    @tensoropt HAC[a0,a1,a2,a3,s'] := ComplexF64.(F0)[a0,b0,c0]*F1[a1,b1,c1]*F2[a2,b2,c2]*F3[a3,b3,c3]*AC[c0,c1,c2,c3,s]* ComplexF64.(M)[b0,b1,b2,b3,s',s]
+function applyH1(AC, M, F0, F1, F2, F3)
+    return @tensor opt=true HAC[a0,a1,a2,a3,s'] := F0[a0,b0,c0]*F1[a1,b1,c1]*F2[a2,b2,c2]*F3[a3,b3,c3]*AC[c0,c1,c2,c3,s]*M[b0,b1,b2,b3,s',s]
 end
-function applyH0(C, F0, F1)
-    @tensor HC[α,β] := F0[α,a,α']*C[α',β']*F1[β,a,β']
+function applyH0(C, FL, FR)
+    return @tensor HC[α,β] := FL[α,a,α']*C[α',β']*FR[β,a,β']
 end
 
 #sets the right/left bond dimension of A, ie will truncate if Dnew is smaller than the current bond dimension and zero pad if it's larger
@@ -349,17 +401,17 @@ function setleftbond(A, Dnew::Int)
     return a
 end
 
-function setbond(A::Union{CuArray{T, 2}, Array{T, 2}}, Dnew::Int) where T
+function setbond(A::AbstractArray{T, 2}, Dnew::Int) where T
     Dold, d = size(A)
     a = fill!(similar(A, Dnew, d), 0)
     Dold > Dnew ? (D = Dnew) : (D = Dold)
     a[1:D,:] = A[1:D,:]
     return a
 end
-function setbond(A::Union{CuArray{T, 2}, Array{T, 2}}) where T
+function setbond(A::AbstractArray{T, 2}) where T
     return A
 end
-function setbond(A::Union{CuArray{T, 3}, Array{T, 3}}, D1new::Int, D2new::Int) where T
+function setbond(A::AbstractArray{T, 3}, D1new::Int, D2new::Int) where T
     D1old, D2old, d = size(A)
     a = fill!(similar(A, D1new, D2new, d), 0)
     D1old > D1new ? (D1 = D1new) : (D1 = D1old)
@@ -367,14 +419,14 @@ function setbond(A::Union{CuArray{T, 3}, Array{T, 3}}, D1new::Int, D2new::Int) w
     a[1:D1,1:D2,:] = A[1:D1,1:D2,:]
     return a
 end
-function setbond(A::Union{CuArray{T, 3}, Array{T, 3}}, D2new::Int) where T
+function setbond(A::AbstractArray{T, 3}, D2new::Int) where T
     D1old, D2old, d = size(A)
     a = fill!(similar(A, D1old, D2new, d), 0)
     D2old > D2new ? (D2 = D2new) : (D2 = D2old)
     a[:,1:D2,:] = A[:,1:D2,:]
     return a
 end
-function setbond(A::Union{CuArray{T, 4}, Array{T, 4}}, D1new::Int, D2new::Int, D3new::Int) where T
+function setbond(A::AbstractArray{T, 4}, D1new::Int, D2new::Int, D3new::Int) where T
     D1old, D2old, D3old, d = size(A)
     a = fill!(similar(A, D1new, D2new, D3new, d), 0)
     D1old > D1new ? (D1 = D1new) : (D1 = D1old)
@@ -383,7 +435,7 @@ function setbond(A::Union{CuArray{T, 4}, Array{T, 4}}, D1new::Int, D2new::Int, D
     a[1:D1,1:D2,1:D3,:] = A[1:D1,1:D2,1:D3,:]
     return a
 end
-function setbond(A::Union{CuArray{T, 4}, Array{T, 4}}, D2new::Int, D3new::Int) where T
+function setbond(A::AbstractArray{T, 4}, D2new::Int, D3new::Int) where T
     D1old, D2old, D3old, d = size(A)
     a = fill!(similar(A, D1old, D2new, D3new, d), 0)
     D2old > D2new ? (D2 = D2new) : (D2 = D2old)
@@ -391,7 +443,7 @@ function setbond(A::Union{CuArray{T, 4}, Array{T, 4}}, D2new::Int, D3new::Int) w
     a[:,1:D2,1:D3,:] = A[:,1:D2,1:D3,:]
     return a
 end
-function setbond(A::Union{Array{T, 5},CuArray{T, 5}}, D1new::Int, D2new::Int, D3new::Int, D4new::Int) where T
+function setbond(A::AbstractArray{T, 5}, D1new::Int, D2new::Int, D3new::Int, D4new::Int) where T
     D1old, D2old, D3old, D4old, d = size(A)
     a = fill!(similar(A, D1new, D2new, D3new, D4new, d), 0)
     D1old > D1new ? (D1 = D1new) : (D1 = D1old)
@@ -401,7 +453,7 @@ function setbond(A::Union{Array{T, 5},CuArray{T, 5}}, D1new::Int, D2new::Int, D3
     a[1:D1,1:D2,1:D3,1:D4,:] = A[1:D1,1:D2,1:D3,1:D4,:]
     return a
 end
-function setbond(A::Union{CuArray{T, 5}, Array{T, 5}}, D2new::Int, D3new::Int, D4new::Int) where T
+function setbond(A::AbstractArray{T, 5}, D2new::Int, D3new::Int, D4new::Int) where T
     D1old, D2old, D3old, D4old, d = size(A)
     a = fill!(similar(A, D1old, D2new, D3new, D4new, d), 0)
     D2old > D2new ? (D2 = D2new) : (D2 = D2old)
@@ -411,13 +463,6 @@ function setbond(A::Union{CuArray{T, 5}, Array{T, 5}}, D2new::Int, D3new::Int, D
     return a
 end
 
-truncAR(A::Array{T, 2}, Dnew) where T = A[1:Dnew,:]
-truncAR(A::Array{T, 3}, Dnew) where T = A[1:Dnew,:,:]
-truncAR(A::Array{T, 4}, Dnew) where T = A[1:Dnew,:,:,:]
-truncAR(A::Array{T, 5}, Dnew) where T = A[1:Dnew,:,:,:,:]
-truncF(F, D) = F[1:D,:,1:D]
-truncF2(F, D) = F[:,:,1:D]
-
 function evolveAC2(dt::Float64, A1, A2, M1, M2, FL, FR, energy=false; kwargs...)
     @tensor AA[a,sa,b,sb] := A1[a,c,sa] * A2[c,b,sb]
 
@@ -425,7 +470,7 @@ function evolveAC2(dt::Float64, A1, A2, M1, M2, FL, FR, energy=false; kwargs...)
     krylovdim = get(kwargs, :krylovdim, 30)
     maxiter = get(kwargs, :maxiter, 100)
 
-    AAnew, info = exponentiate(x->applyH2(x, M1, M2, FL, FR), -im*dt, AA; ishermitian = true, tol=tol, krylovdim=krylovdim, maxiter=maxiter)
+    AAnew, info = exponentiate!(x->applyH2(x, M1, M2, FL, FR), -im*dt, AA; tol=tol, krylovdim=krylovdim, maxiter=maxiter)
 
     if energy
         E = real(dot(AAnew, applyH2(AAnew, M1, M2, FL, FR)))
@@ -435,6 +480,7 @@ function evolveAC2(dt::Float64, A1, A2, M1, M2, FL, FR, energy=false; kwargs...)
 end
 
 function evolveAC(dt::Float64, AC, M, FL, FR, energy=false; projerr = false, kwargs...)
+
     Dlnew, w, Dl = size(FL)
     Drnew, w, Dr = size(FR)
 
@@ -451,7 +497,7 @@ function evolveAC(dt::Float64, AC, M, FL, FR, energy=false; projerr = false, kwa
         pe = nothing
     end
     
-    AC, expinfo = exponentiate(x->applyH1(x, M, FL, FR), -im*dt, AC; ishermitian = true, tol=tol, krylovdim=krylovdim, maxiter=maxiter)
+    AC, expinfo = exponentiate!(x->applyH1(x, M, FL, FR), -im*dt, AC; tol=tol, krylovdim=krylovdim, maxiter=maxiter)
 
     if energy
         E = real(dot(AC, applyH1(AC, M, FL, FR)))
@@ -463,6 +509,7 @@ function evolveAC(dt::Float64, AC, M, FL, FR, energy=false; projerr = false, kwa
 end
 
 function evolveC(dt::Float64, C, FL, FR, energy=false; projerr = false, kwargs...)
+
     tol = get(kwargs, :tol, 1e-12)
     krylovdim = get(kwargs, :krylovdim, 30)
     maxiter = get(kwargs, :maxiter, 100)
@@ -473,7 +520,7 @@ function evolveC(dt::Float64, C, FL, FR, energy=false; projerr = false, kwargs..
         pe = nothing
     end
         
-    C, expinfo = exponentiate(x->applyH0(x, FL, FR), im*dt, C; ishermitian = true, tol=tol, krylovdim=krylovdim, maxiter=maxiter)
+    C, expinfo = exponentiate!(x->applyH0(x, FL, FR), im*dt, C; tol=tol, krylovdim=krylovdim, maxiter=maxiter)
 
     if energy
         E = real(dot(C, applyH0(C, FL, FR)))
@@ -482,72 +529,6 @@ function evolveC(dt::Float64, C, FL, FR, energy=false; projerr = false, kwargs..
     end
     
     return C, (E, pe, expinfo)
-end
-
-# @optimalcontractiontree (a0=>x,a1=>x,c0=>x,c1=>x,s=>x,s'=>x,b0=>x,b1=>x) HAC[a0,a1,s'] := F0[a0,b0,c0]*F1[a1,b1,c1]*AC[c0,c1,s]*M[b0,b1,s',s]
-
-# @tensoropt (a0=>x,a1=>x,c0=>x,c1=>x,s=>x,s'=>x,b0=>x,b1=>x) HAC[a0,a1,s'] := F0[a0,b0,c0]*F1[a1,b1,c1]*AC[c0,c1,s]*M[b0,b1,s',s]
-
-# @optimalcontractiontree (a0=,a1,c0,c1,s,s',b0,b1) HAC[a0,a1,s'] := F0[a0,b0,c0]*F1[a1,b1,c1]*AC[c0,c1,s]*M[b0,b1,s',s]
-# @optimalcontractiontree (α, β, α', β') HC[α,β] := F0[α,a,α']*C[α',β']*F1[β,a,β']
-
-function LA_M_A(LA, M::Array{T1, 3}, A::Array{T2, 2}) where {T1,T2}
-    #EDIT
-    @tensoropt L[a0,s] := LA[a0,b0,c0] * M[b0,s,s'] * A[c0,s']
-end
-function LA_M_A(LA, M::Array{T1, 4}, A::Array{T2, 3}) where {T1,T2}
-    #EDIT
-    @tensoropt L[a0,s,b,c] := LA[a0,b0,c0] * M[b0,b,s,s'] * A[c0,c,s']
-end
-LA_M_A(LA, M::Array{T1, 4}, A::Array{T2, 3}, dir::Int) where {T1,T2} = LA_M_A(LA, M, A)
-function LA_M_A(LA, M::Array{T1, 5}, A::Array{T2, 4}, dir::Int, F1) where {T1,T2}
-    dir==2 && (Aperm = [1,3,2,4]; Mperm = [1,3,2,4,5])
-    dir==3 && (Aperm = [1,2,3,4]; Mperm = [1,2,3,4,5])
-    At = permutedims(A, Aperm)
-    Mt = permutedims(M, Mperm)
-    #EDIT
-    @tensoropt L[a0,a1,s,b,c] := LA[a0,b0,c0] * Mt[b0,b1,b,s,s'] * At[c0,c1,c,s'] * F1[a1,b1,c1]
-end
-function LA_M_A(LA, M::Array{T1, 6}, A::Array{T2, 5}, dir::Int, F1, F2) where {T1,T2}
-    dir==2 && (Aperm = [1,3,4,2,5]; Mperm = [1,3,4,2,5,6])
-    dir==3 && (Aperm = [1,2,4,3,5]; Mperm = [1,2,4,3,5,6])
-    dir==4 && (Aperm = [1,2,3,4,5]; Mperm = [1,2,3,4,5,6])
-    At = permutedims(A, Aperm)
-    Mt = permutedims(M, Mperm)
-    #EDIT
-    @tensoropt L[a0,a1,a2,s,b,c] := LA[a0,b0,c0] * Mt[b0,b1,b2,b,s,s'] * At[c0,c1,c2,c,s'] * F1[a1,b1,c1] * F2[a2,b2,c2]
-end
-
-function L_FR(L::Array{T, 4}, FR) where T
-    @tensor PA[a1,s,a] := L[a1,s,b,c] * FR[a,b,c]    
-end
-function L_FR(L::Array{T, 5}, FR) where T
-    @tensor PA[a1,a2,s,a] := L[a1,a2,s,b,c] * FR[a,b,c]
-end
-function L_FR(L::Array{T, 6}, FR) where T
-    @tensor PA[a1,a2,a3,s,a] := L[a1,a2,a3,s,b,c] * FR[a,b,c]
-end
-
-function L_AL(L::Array{T1, 4}, AL::Array{T2, 3}, Dmax::Int, dir::Int) where {T1,T2}
-    _AL = AL[:,1:Dmax,:] #EDIT
-    @tensor LA[a,b,c] := L[a0,s,b,c] * _AL[a0,a,s]
-end
-function L_AL(L::Array{T1, 5}, AL::Array{T2, 4}, Dmax::Int, dir::Int) where {T1,T2}
-    dir==2 && (Aperm = [1,3,2,4])
-    dir==3 && (Aperm = [1,2,3,4])
-    ALt = permutedims(AL, Aperm)[:,:,1:Dmax,:] #EDIT
-    @tensor LA[a,b,c] := L[a0,a1,s,b,c] * ALt[a0,a1,a,s]
-end
-function L_AL(L::Array{T1, 6}, AL::Array{T2, 5}, Dmax::Int, dir::Int) where {T1,T2}
-    dir==2 && (Aperm = [1,3,4,2,5])
-    dir==3 && (Aperm = [1,2,4,3,5])
-    dir==4 && (Aperm = [1,2,3,4,5])
-    ALt = permutedims(AL, Aperm)[:,:,:,1:Dmax,:] #EDIT
-    @tensor LA[a,b,c] := L[a0,a1,a2,s,b,c] * ALt[a0,a1,a2,a,s]
-end
-
-function LA_FR(LA, FR)
-    @tensor PC[a,a'] := LA[a,b',c'] * FR[a',b',c']
 end
 
 import LinearAlgebra: transpose
@@ -562,115 +543,103 @@ function QR(A::AbstractArray, i::Int)
     dims = [size(A)...]
     nd = length(dims)
     ds = collect(1:nd)
-    AL, C = qr(reshape(permutedims(A, circshift(ds, -i)), :, dims[i]))
-    AL = permutedims(reshape(Matrix(AL), circshift(dims, -i)...), circshift(ds, i))
-    return AL, C
-end
-function QR_full(A::AbstractArray, i::Int)
-    dims = [size(A)...]
-    nd = length(dims)
-    ds = collect(1:nd)
-    AL, C = qr(reshape(permutedims(A, circshift(ds, -i)), :, dims[i]))
-    AL = permutedims(reshape(AL*Matrix(I,size(AL)...), circshift(dims, -i)[1:end-1]..., :), circshift(ds, i))
-    return AL, C
-end
 
+    permuted_A = permutedims(A, circshift(ds, -i))
+    reshaped_input_for_qr = reshape(permuted_A, :, dims[i])
+    AL_factor, C = qr(reshaped_input_for_qr)
+
+    local AL_to_return
+
+    if A isa CuArray
+        explicit_Q_on_gpu = CuMatrix(AL_factor)
+        reshaped_Q_on_gpu = reshape(explicit_Q_on_gpu, circshift(dims, -i)...)
+        AL_to_return = permutedims(reshaped_Q_on_gpu, circshift(ds, i))
+    else
+        temp_cpu_matrix_from_al_factor = Matrix(AL_factor)
+        AL_to_return = permutedims(reshape(temp_cpu_matrix_from_al_factor, circshift(dims, -i)...), circshift(ds, i))
+    end
+    return AL_to_return, C
+end
 
 function QR(A::AbstractArray; SVD=false)
     Dl, Dr, d = size(A)
     if !SVD
-        Q, R = qr(reshape(permutedims(A, [1,3,2]), Dl*d, Dr))
-        AL = permutedims(reshape(Matrix(Q), Dl, d, Dr), [1,3,2])
-        return AL, R #(R = C)
+        Q_factor, R_val = qr(reshape(permutedims(A, [1,3,2]), Dl*d, Dr))
+        
+        local AL_to_return
+        if A isa CuArray
+            explicit_Q_on_gpu = CuMatrix(Q_factor)
+            reshaped_Q_on_gpu = reshape(explicit_Q_on_gpu, Dl, d, Dr)
+            AL_to_return = permutedims(reshaped_Q_on_gpu, [1,3,2])
+        else
+            temp_cpu_matrix_from_q_factor = Matrix(Q_factor)
+            AL_to_return = permutedims(reshape(temp_cpu_matrix_from_q_factor, Dl, d, Dr), [1,3,2])
+        end
+        return AL_to_return, R_val
     else
-        F = svd(reshape(permutedims(A, [1,3,2]), Dl*d, Dr))
+        
+        reshaped_A = permutedims(A, [1,3,2]) 
+        matrix_for_svd = reshape(reshaped_A, Dl*d, Dr)
+
+        F = svd(matrix_for_svd)
+
         AL = permutedims(reshape(F.U, Dl, d, Dr), [1,3,2])
         R = Diagonal(F.S)*F.Vt
+
         return AL, R
     end    
 end
+
 function QR_full(A::AbstractArray; SVD=false)
-    Dl, Dr, d = size(A)
-    if !SVD
-        Q, R = qr(reshape(permutedims(A, [1,3,2]), Dl*d, Dr))
-        AL = permutedims(reshape(Q*Matrix(I, size(Q)...), Dl, d, Dl*d), [1,3,2])
-        return AL, R #(R = C)
-    else
-        F = svd(reshape(permutedims(A, [1,3,2]), Dl*d, Dr), full=true)
-        AL = permutedims(reshape(F.U, Dl, d, Dl*d), [1,3,2])
-        R = Diagonal(F.S)*F.Vt
-        return AL, R
-    end    
+   Dl, Dr, d = size(A)
+   if !SVD
+       Q_factor, R = qr(reshape(permutedims(A, [1,3,2]), Dl*d, Dr))
+       local AL_to_return
+       if A isa CuArray
+           temp_cpu_matrix_from_q_factor_full = Matrix(Q_factor)
+           AL_cpu_version = permutedims(reshape(temp_cpu_matrix_from_q_factor_full, Dl, d, Dl*d), [1,3,2])
+           AL_to_return = CuArray(AL_cpu_version)
+       else
+           temp_cpu_matrix_from_q_factor_full = Matrix(Q_factor)
+           AL_to_return = permutedims(reshape(temp_cpu_matrix_from_q_factor_full, Dl, d, Dl*d), [1,3,2])
+       end
+       return AL_to_return, R #(R = C)
+   else
+       reshaped_A_full = permutedims(A, [1,3,2])
+       matrix_for_svd_full = reshape(reshaped_A_full, Dl*d, Dr)
+
+       F = svd(matrix_for_svd_full, full=true)
+
+       AL = permutedims(reshape(F.U, Dl, d, Dr), [1,3,2])
+       R = Diagonal(F.S)*F.Vt
+
+       return AL, R
+   end
 end
 
-function LQ(A::AbstractArray; SVD=false)
-    Dl, Dr, d = size(A)
-    if !SVD
-        L, Q = lq(reshape(A, Dl, Dr*d))
-        AR = reshape(Matrix(Q), Dl, Dr, d)
-        return L, AR #(L = c)
-    else
-        F = svd(reshape(A, Dl, Dr*d))
-        AR = reshape(F.Vt, Dl, Dr, d)
-        L = F.U*Diagonal(F.S)
-        return L, AR
-    end
-end        
 function LQ_full(A::AbstractArray; SVD=false)
-    Dl, Dr, d = size(A)
-    if !SVD
-        L, Q = lq(reshape(A, Dl, Dr*d))
-        AR = reshape(Q*Matrix(I, size(Q)...), Dr*d, Dr, d)
-        return L, AR #(L = c)
-    else
-        F = svd(reshape(A, Dl, Dr*d), full=true)
-        AR = reshape(F.Vt, Dr*d, Dr, d)
-        L = F.U*Diagonal(F.S)
-        return L, AR
-    end
-end        
+   Dl, Dr, d = size(A)
+   if !SVD
+       L_factor_val, Q_factor = lq(reshape(A, Dl, Dr*d))
+       local AR_to_return
+       if A isa CuArray
+           temp_cpu_matrix_from_q_factor_lq = Matrix(Q_factor)
+           AR_cpu_version = reshape(temp_cpu_matrix_from_q_factor_lq, Dr*d, Dr, d)
+           AR_to_return = CuArray(AR_cpu_version)
+       else
+            temp_cpu_matrix_from_q_factor_lq = Matrix(Q_factor)
+            AR_to_return = reshape(temp_cpu_matrix_from_q_factor_lq, Dr*d, Dr, d)
+       end
+       return L_factor_val, AR_to_return #(L = c)
+   else
 
-function tensor_qr(A)
-    Dl, Dr, d = size(A)
-    Q, R = qr(reshape(permutedims(A, [1,3,2]), Dl*d, Dr))
-    AL = permutedims(reshape(Matrix(Q), Dl, d, Dr), [1,3,2])
-    return AL, R #(R = C)
+       matrix_for_svd_lq = reshape(A, Dl, Dr*d)
+
+       F = svd(matrix_for_svd_lq, full=true)
+      
+       AR = reshape(F.Vt, Dr*d, Dr, d)
+       L = F.U*Diagonal(F.S)
+
+       return L, AR
+   end
 end
-
-function tensor_lq(A)
-    Dl, Dr, d = size(A)
-    L, Q = lq(reshape(A, Dl, Dr*d))
-    AR = reshape(Matrix(Q), Dl, Dr, d)
-    return AR, L #(L = c)
-end
-
-function tensor_qr_full(A)
-    Dl, Dr, d = size(A)
-    Q, R = qr(reshape(permutedims(A, [1,3,2]), Dl*d, Dr))
-    AL = permutedims(reshape(Matrix(Q), Dl, d, Dr), [1,3,2])
-    ALcomp = permutedims(reshape(Q*Matrix(I, size(Q)...), Dl, d, Dl*d)[:,:,Dr+1:Dl*d], [1,3,2])
-    return AL, ALcomp, R
-end
-
-function tensor_lq_full(A)
-    Dl, Dr, d = size(A)
-    L, Q = lq(reshape(A, Dl, Dr*d))
-    AR = reshape(Matrix(Q), Dl, Dr, d)
-    ARcomp = reshape(Q*Matrix(I, size(Q)...), Dr*d, Dr, d)[Dl+1:Dr*d,:,:]
-    return AR, ARcomp, L
-end
-
-"""
-    U, S, Vd = svdtrunc(A; truncdim = max(size(A)...), truncerr = 0.)
-Perform a truncated SVD, with maximum number of singular values to keep equal to `truncdim`
-or truncating any singular values smaller than `truncerr`. If both options are provided, the
-smallest number of singular values will be kept.
-Unlike the SVD in Julia, this returns matrix U, a diagonal matrix (not a vector) S, and
-Vt such that A ≈ U * S * Vt
-"""
-function svdtrunc(A; truncdim = max(size(A)...), truncerr = 0., kwargs...)
-    F = svd(A)
-    d = min(truncdim, count(F.S .>= truncerr))
-    return F.U[:,1:d], diagm(0=>F.S[1:d]), F.Vt[1:d, :]
-end
-

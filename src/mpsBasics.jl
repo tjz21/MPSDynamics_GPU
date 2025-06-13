@@ -1,26 +1,29 @@
+using cuTENSOR
+import TensorOperations: CUDAAllocator, cuTENSORBackend
+const GPU_ALLOCATOR = TensorOperations.CUDAAllocator{CUDA.default_memory, CUDA.default_memory, CUDA.default_memory}()
+
 """
-    orthcentersmps(A)
+    orthcentersmps(A::AbstractVector)
 
 Compute the orthoganality centres of MPS `A`.
 
 Return value is a list in which each element is the corresponding site tensor of `A` with the
-orthoganility centre on that site. Assumes `A` is right normalised.
+orthogonality centre on that site. Assumes `A` is right normalised.
 
 """
-function orthcentersmps(A::Vector)
+function orthcentersmps(A::AbstractVector)
     B = deepcopy(A)
     N = length(B)
     for i in 2:N
         AL, C = QR(B[i-1], 2)
-        B_i = B[i] #EDIT
-        @tensor AC[:] := C[-1,1] * B[1,-2,-3]
+        @tensor backend=cuTENSORBackend() allocator=GPU_ALLOCATOR AC[:] := C[-1,1] * B[i][1,-2,-3]
         B[i] = AC
     end
     return B
 end
 
 """
-    normmps(A::Vector; mpsorthog=:None)
+    normmps(A::AbstractVector; mpsorthog=:None)
 
 Calculate norm of MPS `A`.
 
@@ -29,72 +32,67 @@ Setting `mpsorthog=OC::Int` will cause the norm to be calculated assuming the or
 `OC`. If mpsorthog is `:None` the norm will be calculated as an MPS-MPS product.
 
 """
-function normmps(A::Vector; mpsorthog=:None)
+function normmps(A::AbstractVector; mpsorthog=:None)
     N = length(A)
     if mpsorthog==:Right
-        A_1 = A[1] #EDIT
-        @tensor n[a',b'] := A_1[a',c,s]*conj(A_1[b',c,s])
+        @tensor backend=cuTENSORBackend() allocator=GPU_ALLOCATOR n[a',b'] := A[1][a',c,s]*conj(A[1][b',c,s])
         return sqrt(real(n[1,1]))
     elseif mpsorthog==:Left
-        A_N = A[N] #EDIT
-        @tensor n[a',b'] := A_N[a,a',s]*conj(A_N[a,b',s])
+        @tensor backend=cuTENSORBackend() allocator=GPU_ALLOCATOR n[a',b'] := A[N][a,a',s]*conj(A[N][a,b',s])
         return sqrt(real(n[1,1]))
     elseif typeof(mpsorthog)<:Int
         OC = mpsorthog
-        A_OC = A[OC] #EDIT
-        @tensor n = A_OC[a,b,s]*conj(A_OC[a,b,s])
+        @tensor backend=cuTENSORBackend() allocator=GPU_ALLOCATOR n = A[OC][a,b,s]*conj(A[OC][a,b,s])
         return sqrt(real(n))
     elseif mpsorthog==:None
         ρ = ones(eltype(A[1]), 1, 1)
         for k=1:N
-            A_k = A[k] #EDIT
-            @tensor ρ[a,b] := ρ[a',b']*A_k[b',b,s]*conj(A_k[a',a,s])
+            @tensor backend=cuTENSORBackend() allocator=GPU_ALLOCATOR ρ[a,b] := ρ[a',b']*A[k][b',b,s]*conj(A[k][a',a,s])
         end
         return sqrt(real(ρ[1,1]))
     end
 end
 
 """
-    mpsrightnorm!(A::Vector, jq::Int=1)
+    mpsrightnorm!(A::AbstractVector, jq::Int=1)
 
 Right orthoganalise MPS `A` up to site `jq`.
 
 """
-function mpsrightnorm!(A::Vector, jq::Int=1)
+function mpsrightnorm!(A::AbstractVector, jq::Int=1)
     N = length(A)
     for i=N:-1:jq+1
         aleft, aright, aup = size(A[i])
         C, AR = lq(reshape(A[i], aleft, aright*aup))
-        A[i] = reshape(Matrix(AR), aleft, aright, aup)
-        A_im1 = A[i-1] #EDIT
-        @tensor AC[:] := A_im1[-1,1,-3] * C[1,-2]
+        AR_cpu = Matrix(AR)
+        A[i] = reshape(AR_cpu, aleft, aright, aup)
+        @tensor backend=cuTENSORBackend() allocator=GPU_ALLOCATOR AC[:] := A[i-1][-1,1,-3] * C[1,-2]
         A[i-1] = AC
     end
 end
 
 """
-    mpsleftnorm!(A::Vector, jq::Int=length(A))
+    mpsleftnorm!(A::AbstractVector, jq::Int=length(A))
 
 Left orthoganalise MPS `A` up to site `jq`.
 
 """
-function mpsleftnorm!(A::Vector, jq::Int=length(A))
+function mpsleftnorm!(A::AbstractVector, jq::Int=length(A))
     for i=1:jq-1
         AL, C = QR(A[i], 2)
         A[i] = AL
-        A_ip1 = A[i+1] #EDIT
-        @tensor AC[:] := C[-1,1] * A_ip1[1,-2,-3]
+        @tensor backend=cuTENSORBackend() allocator=GPU_ALLOCATOR AC[:] := C[-1,1] * A[i+1][1,-2,-3]
         A[i+1] = AC
     end
 end
 
 """
-    mpsmixednorm!(A::Vector, OC::Int)
+    mpsmixednorm!(A::AbstractVector, OC::Int)
 
 Put MPS `A` into mixed canonical form with orthogonality centre on site `OC`.
 
 """                   
-function mpsmixednorm!(A::Vector, OC::Int)
+function mpsmixednorm!(A::AbstractVector, OC::Int)
     mpsleftnorm!(A, OC)
     mpsrightnorm!(A, OC)
 end
@@ -146,7 +144,7 @@ Return an MPS representing a product state with local Hilbert space dimensions g
 By default all bond-dimensions will be 1 since the state is a product state. However, to
 embed the product state in a manifold of greater bond-dimension, `Dmax` can be set accordingly.
 
-The indvidual states of the MPS sites can be provdided by setting `state` to a list of
+The indvidual states of the MPS sites can be provided by setting `state` to a list of
 column vectors. Setting `state=:Vacuum` will produce an MPS in the vacuum state (where the
 state of each site is represented by a column vector with a 1 in the first row and zeros
 elsewhere). Setting `state=:FullOccupy` will produce an MPS in which each site is fully
@@ -154,6 +152,17 @@ occupied (ie. a column vector with a 1 in the last row and zeros elsewhere).
 
 The argument `mpsorthog` can be used to set the gauge of the resulting MPS.
 
+# Example
+
+```julia-repl
+julia> ψ = unitcol(1,2); d = 6; N = 30; α = 0.1; Δ = 0.0; ω0 = 0.2; s = 1
+
+julia> cpars = chaincoeffs_ohmic(N, α, s)
+
+julia> H = spinbosonmpo(ω0, Δ, d, N, cpars)
+
+julia> A = productstatemps(physdims(H), state=[ψ, fill(unitcol(1,d), N)...]) # MPS representation of |ψ>|Vacuum>
+```
 """
 function productstatemps(physdims::Dims, Dmax=1; state=:Vacuum, mpsorthog=:Right)
 
@@ -187,7 +196,7 @@ function productstatemps(physdims::Dims, Dmax=1; state=:Vacuum, mpsorthog=:Right
         
     B0 = Vector{Any}(undef, N)
     for i=1:N
-        A = zeros(eltype(statelist[i]), bonddims[i], bonddims[i+1], physdims[i])
+        A = CUDA.zeros(eltype(statelist[i]), bonddims[i], bonddims[i+1], physdims[i])
         for j=1:min(bonddims[i], bonddims[i+1])
             A[j,j,:] = statelist[i]
         end
@@ -242,12 +251,14 @@ function chainmps(N::Int, site::Int, numex::Int)
 end
 
 """
-    chainmps(N::Int, sites::Vector{Int}, numex::Int)
+    chainmps(N::Int, sites::AbstractVector{Int}, numex::Int)
 
 Generate an MPS with `numex` excitations of an equal super-position over `sites`
 
+The returned MPS will have bond-dimensions and physical dimensions `numex+1`
+
 """
-function chainmps(N::Int, sites::Vector{Int}, numex::Int)
+function chainmps(N::Int, sites::AbstractVector{Int}, numex::Int)
     all(x-> 1<=x<=N, sites) || throw(ErrorException("tried to excite non-existant site of $N-site chain"))
     D = numex + 1
     numsites = length(sites)
@@ -272,7 +283,7 @@ end
 
 Generate an MPS with `numex` excitations of mode `k` of a bosonic tight-binding chain. 
 
-`chainparams` takes the form `[e::Vector, t::Vector]` where `e` are the on-site energies and `t` are the hoppping
+`chainparams` takes the form `[e::AbstractVector, t::AbstractVector]` where `e` are the on-site energies and `t` are the hoppping
 parameters.
 
 The returned MPS will have bond-dimensions and physical dimensions `numex+1`
@@ -305,12 +316,12 @@ function modemps(N::Int, k::Int, numex::Int, chainparams=[fill(1.0,N), fill(1.0,
 end
 
 """
-    modemps(N::Int, k::Vector{Int}, numex::Int, chainparams=[fill(1.0,N), fill(1.0,N-1)])
+    modemps(N::Int, k::AbstractVector{Int}, numex::Int, chainparams=[fill(1.0,N), fill(1.0,N-1)])
 
 Generate an MPS with `numex` excitations of an equal superposition of modes `k` of a bosonic tight-binding chain.
 
 """
-function modemps(N::Int, k::Vector{Int}, numex::Int, chainparams=[fill(1.0,N), fill(1.0,N-1)])
+function modemps(N::Int, k::AbstractVector{Int}, numex::Int, chainparams=[fill(1.0,N), fill(1.0,N-1)])
     all(x -> 1<=x<= N, k) || throw(ErrorException("tried to excite non-existant mode of an $N-site chain"))
     numks = length(k)
     
@@ -333,82 +344,6 @@ function modemps(N::Int, k::Vector{Int}, numex::Int, chainparams=[fill(1.0,N), f
     end
     A[1] = A[1][1:1,:,:] * sqrt(factorial(numex)) * (1/sqrt(numks))^numex
     A[N] = A[N][:,D:D,:]
-    mpsrightnorm!(A)
-    return A
-end
-
-"""
-    electronkmps(N::Int, k::Int, spin=:Up, chainparams=[fill(1.0,N), fill(1.0,N-1)])
-
-Generate an MPS for an electron with momentum `k`.
-
-"""
-function electronkmps(N::Int, k::Int, spin=:Up, chainparams=[fill(1.0,N), fill(1.0,N-1)])
-    1 <= k <= N || throw(ErrorException("tried to excite mode $k of an $N-site chain"))
-    
-    es=chainparams[1]
-    ts=chainparams[2]
-    hmat = diagm(0=>es, 1=>ts, -1=>ts)
-    F = eigen(hmat)
-    U = F.vectors
-
-    if spin==:Up
-        i=2
-    elseif spin==:Down
-        i=3
-    elseif spin==:UpDown
-        i=4
-    end
-    
-    A = Vector{Any}(undef, N)
-    for n=1:N
-        M = zeros(eltype(U), 2, 2, 4)
-        M[:,:,1] = unitmat(2)
-        M[:,:,i] = diagm(1 => [U[n,k]])
-        A[n] = M
-    end
-    A[1] = A[1][1:1,:,:]
-    A[N] = A[N][:,2:2,:]
-    mpsrightnorm!(A)
-    return A
-end
-
-"""
-    electronkmps(N::Int, k::Vector{Int}, spin=:Up, chainparams=[fill(1.0,N), fill(1.0,N-1)])
-
-Generate an MPS with 2 electrons in k-states `k1` and `k2`.
-
-"""
-function electron2kmps(N::Int, k1::Int, k2::Int, spin=:Up, chainparams=[fill(1.0,N), fill(1.0,N-1)])
-    all(x -> 1<=x<= N, [k1,k2]) || throw(ErrorException("tried to excite non-existant mode of an $N-site chain"))
-
-    es=chainparams[1]
-    ts=chainparams[2]
-    hmat = diagm(0=>es, 1=>ts, -1=>ts)
-    F = eigen(hmat)
-    U = F.vectors
-
-    if spin==:Up
-        i=2
-    elseif spin==:Down
-        i=3
-    elseif spin==:UpDown
-        i=4
-    end
-    
-    A = Vector{Any}(undef, N)
-
-    for n=1:N
-        M = zeros(eltype(U), 4, 4, 4)
-        M[:,:,1] = unitmat(4)
-        M[:,:,i] = [0.0 U[n,k1] -U[n,k2] 0.0    ;
-                    0.0 0.0      0.0     U[n,k2];
-                    0.0 0.0      0.0     U[n,k1];
-                    0.0 0.0      0.0     0.0    ]
-        A[n] = M
-    end
-    A[1] = A[1][1:1,:,:]
-    A[N] = A[N][:,4:4,:]
     mpsrightnorm!(A)
     return A
 end
@@ -471,7 +406,7 @@ Return the element of the MPS `A` for the set of physical states `el...`
 
 # Examples
 
-```jldoctest
+```julia-repl
 julia> A = chainmps(6, [2,4], 1);
 
 julia> elementmps(A, 1, 2, 1, 1, 1, 1)
@@ -512,28 +447,61 @@ function elementmpo(M, el...)
     c[1,1]
 end
 
-function apply1siteoperator!(A, O, sites::Vector{Int})
+"""
+    apply1siteoperator!(A, O, sites::AbstractVector{Int})
+
+Apply an operator O on the MPS A. O is acting on several sites ::AbstractVector{Int}. The resulting MPS A is the MPS modified by the operator O.
+
+"""
+function apply1siteoperator!(A, O, sites::AbstractVector{Int})
     for i in sites
-        A_i = A[i] #EDIT
-        @tensor R[a,b,s] := O[s,s']*A_i[a,b,s']
+        @tensor backend=cuTENSORBackend() allocator=GPU_ALLOCATOR R[a,b,s] := O[s,s']*A[i][a,b,s']
         A[i] = R
     end
 end
+
+"""
+    apply1siteoperator!(A, O, sites::Int)
+
+Apply an operator O on the MPS A. O is acting on only one site ::Int. The resulting MPS A is the MPS modified by the operator O.
+
+"""
 apply1siteoperator!(A, O, site::Int) = apply1siteoperator!(A, O, [site])
 
-function applympo!(A, H)
+"""
+    applympo!(A, H; SVD=false, kwargs...)
+
+Apply an MPO H on the MPS A. H must have the same number of site than A. The resulting MPS A is the MPS modified by the MPO H. The argument SVD can be set to true if one wants the MPS to recover the same dimensions after having applied the MPO H. Further parameters for the SVD truncation can be added with the kwargs.
+
+"""
+function applympo!(A, H ; SVD=false, kwargs...)
     N = length(H)
     N == length(A) || throw(ArgumentError("MPO has $N site while MPS has $(length(A)) sites"))
     for i=1:N
         Al, Ar, d = size(A[i])
         Hl, Hr, d, d = size(H[i])
-        H_i = H[i] #EDIT
-        A_i = A[1]
-        @tensor X[a',a,b',b,s] := H_i[a',b',s,s'] * A_i[a,b,s']
+        @tensor backend=cuTENSORBackend() allocator=GPU_ALLOCATOR X[a',a,b',b,s] := H[i][a',b',s,s'] * A[i][a,b,s']
         A[i] = reshape(X, Al*Hl, Ar*Hr, d)
+    end
+    if SVD
+        for i in 2:N
+            Dl, Dr, d = size(A[i-1])
+            U, S, Vt = svdtrunc(reshape(permutedims(A[i-1], [1,3,2]), Dl*d, Dr); kwargs...)
+            Dnew = size(S,1)
+            A[i-1] = permutedims(reshape(U, Dl, d, Dnew), [1,3,2])
+            R = Diagonal(S)*Vt
+            @tensor backend=cuTENSORBackend() allocator=GPU_ALLOCATOR AC[:] := R[-1,1] * A[i][1,-2,-3]
+            A[i] = AC
+        end
     end
 end
 
+"""
+    reversemps!(A)
+
+Reverse the left and right dimensions of the MPS A. The resulting MPS A is the reversed MPS.
+
+"""
 function reversemps!(A)
     N = length(A)
     reverse!(A)
@@ -541,6 +509,13 @@ function reversemps!(A)
         A[i] = permutedims(A[i], [2,1,3])
     end
 end
+
+"""
+    reversemps(A)
+
+Reverse the left and right bond-dimensions of the MPS A.
+
+"""
 function reversemps(A)
     N = length(A)
     Ar = Vector{Any}(undef, N)
@@ -550,6 +525,12 @@ function reversemps(A)
     return Ar
 end
 
+"""
+    reversempo!(M)
+
+Reverse the left and right dimensions of the MPO M. The resulting MPO M is the reversed MPO.
+
+"""
 function reversempo!(M)
     N = length(M)
     reverse!(M)
@@ -557,6 +538,13 @@ function reversempo!(M)
         M[i] = permutedims(M[i], [2,1,3,4])
     end
 end
+
+"""
+    reversempo(M)
+    
+Reverse the left and right dimensions of the MPO M.
+
+"""
 function reversempo(M)
     N = length(M)
     Mr = Vector{Any}(undef, N)
@@ -571,7 +559,7 @@ end
 
 Return the physical dimensions of an MPS or MPO `M`.
 """
-function physdims(M::Vector)
+function physdims(M::AbstractVector)
     N = length(M)
     res = Vector{Int}(undef, N)
     for (i, site) in enumerate(M)
@@ -587,7 +575,7 @@ function ltrunc(A, D::Int)
     A[:,1:D,:]
 end
 #storing two copys of mps is not so memory efficient
-function mpsform(A_::Vector)
+function mpsform(A_::AbstractVector)
     A = deepcopy(A_)
     N = length(A)
     for i=1:N-1
@@ -597,7 +585,7 @@ function mpsform(A_::Vector)
     end
     return A
 end
-function mpsform!(A::Vector)
+function mpsform!(A::AbstractVector)
     N = length(A)
     for i=1:N-1
         D = min(size(A[i])[2], size(A[i+1])[1])
@@ -606,7 +594,7 @@ function mpsform!(A::Vector)
     end
 end
 
-function bonddimsmps(A::Vector)
+function bonddimsmps(A::AbstractVector)
     N = length(A)
     res = Vector{Int}(undef, N+1)
     res[1] = res[N+1] = 1
@@ -615,7 +603,7 @@ function bonddimsmps(A::Vector)
     end
     return Dims(res)
 end
-function bonddims(M::Vector)
+function bonddims(M::AbstractVector)
     N = length(M)
     res = Vector{Int}(undef, N+1)
     res[1] = res[N+1] = 1
@@ -625,29 +613,31 @@ function bonddims(M::Vector)
     return Dims(res)
 end
 
-#calculates M1*M2 where M1 and M2 are MPOs
-function multiply(M1::Vector, M2::Vector)
+"""
+    multiply(M1::AbstractVector, M2::AbstractVector)
+
+Calculates M1*M2 where M1 and M2 are MPOs
+
+"""
+function multiply(M1::AbstractVector, M2::AbstractVector)
     N = length(M1)
     length(M2) == N || throw(ArgumentError("MPOs do not have the same length!"))
     res = Vector{Any}(undef, N)
     for k=1:N
         Dl1, Dr1, d, d = size(M1[k])
         Dl2, Dr2, d, d = size(M2[k])
-        M1_k = M1[k] #EDIT
-        M2_k = M2[k]
-        @tensor M12[a1,a2,b1,b2,s1,s2] := M1_k[a1,b1,s1,s] * M2_k[a2,b2,s,s2]
+        @tensor backend=cuTENSORBackend() allocator=GPU_ALLOCATOR M12[a1,a2,b1,b2,s1,s2] := M1[k][a1,b1,s1,s] * M2[k][a2,b2,s,s2]
         res[k] = reshape(M12, Dl1*Dl2, Dr1*Dr2, d, d)
     end
     return res
 end
 
 """
-    mpsembed(A::Vector, Dmax::Int)
+    mpsembed!(A::AbstractVector, Dmax::Int)
 
 Embed MPS `A` in manifold of max bond-dimension `Dmax`
-
 """
-function mpsembed!(A::Vector, Dmax::Int)
+function mpsembed!(A::AbstractVector, Dmax::Int)
 
     N = length(A)
     pdims = physdims(A)
@@ -670,4 +660,3 @@ function mpsembed!(A::Vector, Dmax::Int)
     mpsrightnorm!(A)
     return A
 end
-

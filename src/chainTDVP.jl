@@ -1,13 +1,8 @@
-mutable struct ChainLightCone <: LightCone
-    ref::Vector # vector of OCs of initial mps
-    edge::Int # last site to be ev
-    thresh::Float64
-    ChainLightCone(A::Vector, edge::Int, thresh::Float64) = new(orthcentersmps(A), edge, thresh)
-end
-ChainLightCone(A::Vector, rad::Int=2) = ChainLightCone(A, rad, DEFLCTHRESH)
-LightCone(A::Vector, rad::Int=2, thresh=DEFLCTHRESH) = ChainLightCone(A, rad, thresh)
+using cuTENSOR
+import TensorOperations: CUDAAllocator, cuTENSORBackend
+const GPU_ALLOCATOR = TensorOperations.CUDAAllocator{CUDA.default_memory, CUDA.default_memory, CUDA.default_memory}()
 
-function initenvs(A::Vector, M::Vector, F::Nothing)
+function initenvs(A::AbstractVector, M::AbstractVector, F::Nothing)
     N = length(A)
     F = Vector{Any}(undef, N+2)
     F[1] = fill!(similar(M[1], (1,1,1)), 1)
@@ -17,13 +12,13 @@ function initenvs(A::Vector, M::Vector, F::Nothing)
     end
     return F
 end
-initenvs(A::Vector, M::Vector) = initenvs(A, M, nothing)
-initenvs(A::Vector, M::Vector, F::Vector) = F
+initenvs(A::AbstractVector, M::AbstractVector) = initenvs(A, M, nothing)
+initenvs(A::AbstractVector, M::AbstractVector, F::AbstractVector) = F
 
 initrightenvs(A, M, F) = initenvs(A, M, F)
 initrightenvs(A, M) = initenvs(A, M)
 
-function initleftenvs(A::Vector, M::Vector, F::Nothing)
+function initleftenvs(A::AbstractVector, M::AbstractVector, F::Nothing)
     N = length(A)
     F = Vector{Any}(undef, N+2)
     F[1] = fill!(similar(M[1], (1,1,1)), 1)
@@ -33,11 +28,11 @@ function initleftenvs(A::Vector, M::Vector, F::Nothing)
     end
     return F
 end
-initleftenvs(A::Vector, M::Vector) = initleftenvs(A, M, nothing)
-initleftenvs(A::Vector, M::Vector, F::Vector) = F
+initleftenvs(A::AbstractVector, M::AbstractVector) = initleftenvs(A, M, nothing)
+initleftenvs(A::AbstractVector, M::AbstractVector, F::AbstractVector) = F
 
 
-function initrightenvs_full(A::Vector, M::Vector; Dplusmax=nothing, SVD=false)
+function initrightenvs_full(A::AbstractVector, M::AbstractVector; Dplusmax=nothing, SVD=false)
     N = length(A)
     F = Vector{Any}(undef, N-1)
     Afull = Vector{Any}(undef, N-1)
@@ -49,11 +44,12 @@ function initrightenvs_full(A::Vector, M::Vector; Dplusmax=nothing, SVD=false)
         AR = AR[1:Dmax,:,:]
         Afull[k-1] = AR
         F[k-1] = updaterightenv(AR, M[k], FR)
+        C = nothing
         FR = F[k-1][1:aleft,:,1:aleft]
     end
     return F, Afull
 end
-function initleftenvs_full(A::Vector, M::Vector)
+function initleftenvs_full(A::AbstractVector, M::AbstractVector)
     N = length(A)
     F = Vector{Any}(undef, N-1)
     Afull = Vector{Any}(undef, N-1)
@@ -63,58 +59,13 @@ function initleftenvs_full(A::Vector, M::Vector)
         AL, C = QR_full(A[k])
         Afull[k] = AL
         F[k] = updaterightenv(AL, M[k], FL)
+        C = nothing
         FL = F[k][1:aright,:,1:aright]
     end
     return F, Afull
 end
 
-function tdvp1sweep_dynamic!(dt2, A::Vector, M::Vector, Afull=nothing, FRs=nothing; obs=Vector{Observable}, prec=10^-3, Dlim=50, SVD=false, verbose=false, error=false, timed=false, Dplusmax=nothing, kwargs...)
-
-    N = length(A)
-    dt = dt2/2
-
-    if Afull==nothing || FRs==nothing
-        FRs, Afull = initrightenvs_full(A, M, Dplusmax=Dplusmax, SVD=SVD)
-    end
-
-    error && (M2 = multiply(M,M))
-
-    info = []
-
-    if timed
-        val, t, bytes, gctime, memallocs = @timed updaterightbonds(FRs, A, M, prec, Dlim, Dplusmax, SVD)
-        push!(info, ("t1",t))
-        FR, ACs, effect, acc, newdims = val
-    else
-        FR, ACs, effect, acc, newdims = updaterightbonds(FRs, A, M, prec, Dlim, Dplusmax, SVD)
-    end
-    push!(info, ("obs", measure(A, obs; acs=ACs)))
-    push!(info, ("dims",[newdims...]))
-    rpad!.(effect, Dlim)
-    push!(info, ("effect", effect))
-    if error
-        h2 = measurempo(A, M2)
-        push!(info, ("err", h2 - acc))
-    end
-    if timed
-        val, t, bytes, gctime, memallocs = @timed tdvp1rightsweep!(dt, A, Afull, M, FR; SVD=SVD, verbose=verbose, kwargs...)
-        push!(info, ("t2",t))
-        A, FLs = val
-    else
-        A, FLs = tdvp1rightsweep!(dt, A, Afull, M, FR; SVD=SVD, verbose=verbose, kwargs...)
-    end
-
-    if timed
-        val, t, bytes, gctime, memallocs = @timed tdvp1leftsweep!(dt, A, M, FLs, Dlim; SVD=SVD, verbose=verbose, Dplusmax=Dplusmax, kwargs...)
-        push!(info, ("t3",t))
-        A, Afull, FRs = val
-    else
-        A, Afull, FRs = tdvp1leftsweep!(dt, A, M, FLs, Dlim; SVD=SVD, verbose=verbose, Dplusmax=Dplusmax, kwargs...)
-    end
-    return A, Afull, FRs, Dict(info)
-end
-
-function tdvp1rightsweep!(dt, A::Vector, Afull::Vector, M::Vector, FR::Vector; verbose=false, SVD=false, kwargs...)
+function tdvp1rightsweep!(dt, A::AbstractVector, Afull::AbstractVector, M::AbstractVector, FR::AbstractVector; verbose=false, SVD=false, kwargs...)
     N = length(A)
     FLs = Vector{Any}(undef, N-1)
     AC = A[1]
@@ -136,8 +87,8 @@ function tdvp1rightsweep!(dt, A::Vector, Afull::Vector, M::Vector, FR::Vector; v
         C, info = evolveC(dt, C, FL, FR[k], verbose; kwargs...)
         verbose && println("Sweep L->R: C between site $k and $(k+1), energy $(info[1])")
 
-        Afull_k = Afull[k][1:Dnew,:,:] #EDIT
-        @tensor AC[:] := C[-1,1] * Afull_k[1,-2,-3]
+        @tensor backend=cuTENSORBackend() allocator=GPU_ALLOCATOR AC[:] := C[-1,1] * Afull[k][1:Dnew,:,:][1,-2,-3]
+        C = nothing
 
     end
     FR = fill!(similar(M[1], (1,1,1)), 1)
@@ -146,7 +97,7 @@ function tdvp1rightsweep!(dt, A::Vector, Afull::Vector, M::Vector, FR::Vector; v
     A[N] = AC
     return A, FLs
 end
-function tdvp1leftsweep!(dt, A::Vector, M::Vector, FL::Vector, Dlim::Int; SVD=false, verbose=false, Dplusmax=nothing, kwargs...)
+function tdvp1leftsweep!(dt, A::AbstractVector, M::AbstractVector, FL::AbstractVector, Dlim::Int; SVD=false, verbose=false, Dplusmax=nothing, kwargs...)
     N = length(A)
     FRs = Vector{Any}(undef, N-1)
     Afull = Vector{Any}(undef, N-1)
@@ -169,8 +120,8 @@ function tdvp1leftsweep!(dt, A::Vector, M::Vector, FL::Vector, Dlim::Int; SVD=fa
         C, info = evolveC(dt, C, FL[k-1], FR, verbose; kwargs...)
         verbose && println("Sweep R->L: C between site $k and $(k-1), energy $(info[1])")
         
-        A_km1 = A[k-1] #EDIT
-        @tensor AC[:] := C[2,-2] * A_km1[-1,2,-3]
+        @tensor backend=cuTENSORBackend() allocator=GPU_ALLOCATOR AC[:] := C[2,-2] * A[k-1][-1,2,-3]
+        C = nothing
 
         Afull[k-1] = AR
     end
@@ -196,29 +147,21 @@ function updaterightbonds(FRs, A, M, th, Dlim, Dplusmax=nothing, SVD=false)
         Dr = olddims[k+1]
         d = size(A[k])[3]
         Dmax = min((Dplusmax != nothing ? min(Dl*d, Dr+Dplusmax) : Dl*d), Dlim)
-        M_k = M[k] # EDIT
-        A_k = A[k]
-        @tensor L[a,s,b,c] := LA[a,b',c'] * M_k[b',b,s,s'] * A_k[c',c,s']
-        FRs_k = FRs[k][:,:,1:Dr] # EDIT
-        @tensor PAs[k][a,s,a'] := L[a,s,b',c'] * FRs_k[a',b',c']
+        @tensor backend=cuTENSORBackend() allocator=GPU_ALLOCATOR L[a,s,b,c] := LA[a,b',c'] * M[k][b',b,s,s'] * A[k][c',c,s']
+        @tensor backend=cuTENSORBackend() allocator=GPU_ALLOCATOR PAs[k][a,s,a'] := L[a,s,b',c'] * FRs[k][:,:,1:Dr][a',b',c']
         AL, C = QR_full(AC; SVD=SVD)
-        A_kp1 = A[k+1][1:Dr,:,:] #EDIT
-        @tensor AC[a,b,s] := C[a,a'] * A_kp1[a',b,s]
+        @tensor backend=cuTENSORBackend() allocator=GPU_ALLOCATOR AC[a,b,s] := C[a,a'] * A[k+1][1:Dr,:,:][a',b,s]
+        C = nothing
         ACs[k+1] = AC
-        _L = L[1:Dl,:,:,:] #EDIT
-        _AL = AL[:,1:Dmax,:]
-        @tensor LA[a,b,c] := _L[a',s,b,c] * _AL[a',a,s]
-        #EDIT
-        @tensor PCs[k][a,a'] := LA[a,b',c'] * FRs_k[a',b',c']
+        @tensor backend=cuTENSORBackend() allocator=GPU_ALLOCATOR LA[a,b,c] := L[1:Dl,:,:,:][a',s,b,c] * AL[:,1:Dmax,:][a',a,s]
+        L = nothing
+        AL = nothing
+        @tensor backend=cuTENSORBackend() allocator=GPU_ALLOCATOR PCs[k][a,a'] := LA[a,b',c'] * FRs[k][:,:,1:Dr][a',b',c']
     end
     Dl = olddims[N]
-    M_N = M[N] #EDIT
-    A_N = A[N] #EDIT
-    @tensor L[a,s,b,c] := LA[a,b',c'] * M_N[b',b,s,s'] * A_N[c',c,s']
+    @tensor backend=cuTENSORBackend() allocator=GPU_ALLOCATOR L[a,s,b,c] := LA[a,b',c'] * M[N][b',b,s,s'] * A[N][c',c,s']
     FR = fill!(similar(M[1], (1,1,1)), 1)
-    #EDIT
-    @tensor PAs_N[a,s,a'] := L[a,s,b',c'] * FR[a',b',c']
-    PAs[N] = PAs_N
+    @tensor backend=cuTENSORBackend() allocator=GPU_ALLOCATOR PAs[N][a,s,a'] := L[a,s,b',c'] * FR[a',b',c']
 
     # update bond-dimensions
     newdims, effect, acc = updatedims(A, PAs, PCs, th, Dlim)
@@ -245,29 +188,22 @@ function updateleftbonds(FLs, A, M, th, Dlim)
         Dr = olddims[k+1]
         Dl == size(A[k])[1] || throw(ErrorException("Dl mismatch"))
         Dr == size(A[k])[2] || throw(ErrorException("Dr mismatch"))
-        M_k = M[k] #EDIT
-        A_k = A[k]
-        @tensor R[a,s,b,c] := RA[a,b',c'] * M_k[b,b',s,s'] * A_k[c,c',s']
-        FLs_km1 = FLs[k-1][:,:,1:Dl] #EDIT
-        @tensor PAs_k[a',s,a] := R[a,s,b',c'] * FLs_km1[a',b',c']
-        PAs[k] = PAs_k #EDIT
+        @tensor backend=cuTENSORBackend() allocator=GPU_ALLOCATOR R[a,s,b,c] := RA[a,b',c'] * M[k][b,b',s,s'] * A[k][c,c',s']
+        @tensor backend=cuTENSORBackend() allocator=GPU_ALLOCATOR PAs[k][a',s,a] := R[a,s,b',c'] * FLs[k-1][:,:,1:Dl][a',b',c']
         C, AR = LQ_full(AC)
-        A_km1 = A[k-1][:,1:Dl,:] #EDIT
-        @tensor AC[a,b,s] := C[b',b] * A_km1[a,b',s]
+        @tensor backend=cuTENSORBackend() allocator=GPU_ALLOCATOR AC[a,b,s] := C[b',b] * A[k-1][:,1:Dl,:][a,b',s]
+        C = nothing
         ACs[k-1] = AC
-        _R = R[1:Dr,:,:,:] #EDIT
-        @tensor RA[a,b,c] := _R[a',s,b,c] * AR[a,a',s]
-        #EDIT
-        @tensor PCs[k-1][a,a'] := RA[a,b',c'] * FLs_km1[a',b',c']
+        @tensor backend=cuTENSORBackend() allocator=GPU_ALLOCATOR RA[a,b,c] := R[1:Dr,:,:,:][a',s,b,c] * AR[a,a',s]
+        R = nothing
+        AR = nothing
+        @tensor backend=cuTENSORBackend() allocator=GPU_ALLOCATOR PCs[k-1][a,a'] := RA[a,b',c'] * FLs[k-1][:,:,1:Dl][a',b',c']
     end
     Dr = olddims[2]
-    M_1 = M[1] #EDIT
-    A_1 = A[1]
-    @tensor R[a,s,b,c] := RA[a,b',c'] * M_1[b,b',s,s'] * A_1[c,c',s']
+    @tensor backend=cuTENSORBackend() allocator=GPU_ALLOCATOR R[a,s,b,c] := RA[a,b',c'] * M[1][b,b',s,s'] * A[1][c,c',s']
     FL = fill!(similar(M[1], (1,1,1)), 1)
-    @tensor PAs_1[a',s,a] := R[a,s,b',c'] * FL[a',b',c']
-    PAs[1] = PAs_1    
-
+    @tensor backend=cuTENSORBackend() allocator=GPU_ALLOCATOR PAs[1][a',s,a] := R[a,s,b',c'] * FL[a',b',c']
+    
     # update bond-dimensions
     newdims, effect, acc = updatedims(A, PAs, PCs, th, Dlim)
     # construct FLs for next TDVP sweep
@@ -278,7 +214,7 @@ function updateleftbonds(FLs, A, M, th, Dlim)
     return FLs, ACs, effect, acc, Dims(newdims)
 end
 
-function updatedims(A::Vector, PAs::Vector, PCs::Vector, th, Dlim)
+function updatedims(A::AbstractVector, PAs::AbstractVector, PCs::AbstractVector, th, Dlim)
     N = length(PAs)
     olddims = bonddimsmps(A)
     newdims = Vector{Int}(undef, N+1)
@@ -293,7 +229,6 @@ function updatedims(A::Vector, PAs::Vector, PCs::Vector, th, Dlim)
         Dnew=1
         while Dnew < Dmax && Dnew < Dlim
             x = (effect[k][Dnew+1]/effect[k][Dnew]) - 1
-#            x = effect[k][Dnew+1]-effect[k][Dnew]
             if x > th
                 Dnew+=1
             else
@@ -302,7 +237,6 @@ function updatedims(A::Vector, PAs::Vector, PCs::Vector, th, Dlim)
         end
 
         newdims[k+1] = max(olddims[k+1], Dnew)
-#        newdims[k+1] = Dnew
 
         acc += norm(PAs[k][1:newdims[k],:,1:newdims[k+1]])^2
         acc -= norm(PCs[k][1:newdims[k+1],1:newdims[k+1]])^2
@@ -310,8 +244,14 @@ function updatedims(A::Vector, PAs::Vector, PCs::Vector, th, Dlim)
     acc += norm(PAs[N][1:newdims[N],:,1:newdims[N+1]])^2
     return Dims(newdims), effect, acc
 end
-        
-function tdvp1sweep!(dt2, A::Vector, M::Vector, F=nothing; verbose=false, kwargs...)
+
+"""
+    tdvp1sweep!(dt2, A::AbstractVector, M::AbstractVector, F=nothing; verbose=false, kwargs...)
+
+Propagates the MPS A with the MPO M following the 1-site TDVP method. The sweep is done back and forth with a time step dt2/2. F represents the merged left and right parts of the site being propagated.  
+"""
+
+function tdvp1sweep!(dt2, A::AbstractVector, M::AbstractVector, F=nothing; verbose=false, kwargs...)
     N = length(A)
     dt = dt2/2
     F = initenvs(A, M, F)
@@ -327,8 +267,8 @@ function tdvp1sweep!(dt2, A::Vector, M::Vector, F=nothing; verbose=false, kwargs
         C, info = evolveC(dt, C, F[k+1], F[k+2], verbose; kwargs...)
         verbose && println("Sweep L->R: C between site $k and $(k+1), energy $(info[1])")
 
-        A_kp1 = A[k+1] #EDIT
-        @tensor AC[:] := C[-1,1] * A_kp1[1,-2,-3]
+        @tensor backend=cuTENSORBackend() allocator=GPU_ALLOCATOR AC[:] := C[-1,1] * A[k+1][1,-2,-3]
+        C = nothing
     end
     k = N
     AC, info = evolveAC(dt2, AC, M[k], F[k], F[k+2], verbose; kwargs...)
@@ -338,100 +278,15 @@ function tdvp1sweep!(dt2, A::Vector, M::Vector, F=nothing; verbose=false, kwargs
         A[k+1] = AR
         F[k+2] = updaterightenv(A[k+1], M[k+1], F[k+3])
 
-        C, info = evolveC(dt, C, F[k+2], F[k+1], verbose; kwargs...)
+        C, info = evolveC(dt, C, F[k+1], F[k+2], verbose; kwargs...)
         verbose && println("Sweep R->L: C between site $k and $(k+1), energy $(info[1])")
-        A_k = A[k]
-        @tensor AC[:] := C[-2,1] * A_k[-1,1,-3]
+
+        @tensor backend=cuTENSORBackend() allocator=GPU_ALLOCATOR AC[:] := A[k][-1,1,-3] * C[1,-2]
+        C = nothing
 
         AC, info = evolveAC(dt, AC, M[k], F[k], F[k+2], verbose; kwargs...)
         verbose && println("Sweep R->L: AC site $k, energy $(info[1])")
     end
-    A[1] = AC
-    return A, F
-end
-
-function tdvp1sweep_lc!(dt2, A::Vector, M::Vector, lc::ChainLightCone, F=nothing; verbose=false, kwargs...)
-
-    N = length(A)
-    
-    dt = dt2/2
-    F = initenvs(A, M, F)
-
-    k=1
-    AC = A[k]
-    AC, info = exponentiate(x->applyH1(x, M[k], F[k], F[k+2]), -im*dt, AC; ishermitian = true)
-    if verbose
-        E = real(dot(AC, applyH1(AC, M[k], F[k], F[k+2])))
-        println("Sweep L->R: AC site 1, energy $E")
-    end
-
-    if k == lc.edge && lc.edge != N
-        lc_ref_kp1 = lc.ref[k+1] #EDIT
-        @tensor v = tensorscalar(conj(AC[a,b,s])*lc_ref_kp1[a,b,s])
-        if 1-norm(v) > lc.thresh
-            lc.edge += 1
-        end
-    end
-
-    while k <= lc.edge-1 && k <= N-1
-
-        AL, C = QR(AC, 2)
-        A[k] = AL
-        F[k+1] = updateleftenv(A[k], M[k], F[k])
-
-        C, info = exponentiate(x->applyH0(x,F[k+1],F[k+2]), im*dt, C; ishermitian = true)
-        if verbose
-            E = real(dot(C, applyH0(C, F[k+1], F[k+2])))
-            println("Sweep L->R: C between site $k and $(k+1), energy $E")
-        end
-        
-        A_kp1 = A[k+1] #EDIT
-        @tensor AC[:] := C[-1,1] * A_kp1[1,-2,-3]
-
-        AC, info = exponentiate(x->applyH1(x, M[k+1], F[k+1], F[k+3]), -im*dt, AC; ishermitian = true)
-        if verbose
-            E = real(dot(AC, applyH1(AC, M[k+1], F[k+1], F[k+3])))
-            println("Sweep L->R: AC site $k, energy $E")
-        end
-
-        if k == lc.edge-1 && lc.edge != N
-            lc_ref_kp1 = lc.ref[k+1] #EDIT
-            @tensor v = tensorscalar(conj(AC[a,b,s])*lc_ref_kp1[a,b,s])
-            if 1-norm(v) > lc.thresh
-                lc.edge += 1
-            end
-        end
-        k+=1
-    end
-
-    for k = lc.edge-1:-1:1
-
-        AC, info = exponentiate(x->applyH1(x, M[k+1], F[k+1], F[k+3]), -im*dt, AC; ishermitian = true)
-        if verbose
-            E = real(dot(AC, applyH1(AC, M[k+1], F[k+1], F[k+3])))
-            println("Sweep R->L: AC site $k, energy $E")
-        end
-
-        AR, C = QR(AC, 1)
-        A[k+1] = AR
-        F[k+2] = updaterightenv(A[k+1], M[k+1], F[k+3])
-
-        C, info = exponentiate(x->applyH0(x, F[k+2], F[k+1]), im*dt, C; ishermitian = true)
-        if verbose
-            E = real(dot(C, applyH0(C, F[k+2], F[k+1])))
-            println("Sweep R->L: C between site $k and $(k+1), energy $E")
-        end
-        A_k = A[k] #EDIT
-        @tensor AC[:] := C[-2,1] * A_k[-1,1,-3]
-
-    end
-    
-    AC, info = exponentiate(x->applyH1(x, M[1], F[1], F[3]), -im*dt, AC; ishermitian = true)
-    if verbose
-        E = real(dot(AC, applyH1(AC, M[1], F[1], F[3])))
-        println("Sweep R->L: AC site 1, energy $E")
-    end
-
     A[1] = AC
     return A, F
 end

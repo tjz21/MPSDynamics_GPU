@@ -1,0 +1,36 @@
+[2025-06-12T20:42:43.863] => RUN <absorption> START
+	 name : Indole in Water: absorption
+	 machine : local
+	 method : TDVP1
+	 dt = 10.0
+	 tmax = 20.0
+	 parameters : psi = [0.6533821121662837; 0.29966881892279423; 0.6951909194361959;;], energy_1 = 0.1875421749387275, energy_2 = 0.19599977444902, coupling = -0.00023289220031456672, dipole_moment_1 = 0.43105974279098397, dipole_moment_2 = 0.9398599634992078, temp = 300, chain_length = 150, num_fock = 30, 
+	 observables : 
+	 convparams : 40
+
+loading MPSDynamics............done
+Dmax : 40 
+1/2, t = 0.000 + 0.000im 
+2/2, t = 10.000 + 0.000im 
+[2025-06-12T20:44:38.777] => RUN <absorption> END
+	 output files produced
+
+total run time : 1 minute, 54 seconds, 322 milliseconds
+[2025-06-12T20:44:41.334] => RUN <emission> START
+	 name : Indole in Water: emission
+	 machine : local
+	 method : TDVP1
+	 dt = 10.0
+	 tmax = 20.0
+	 parameters : energy_1 = 0.1875421749387275, energy_2 = 0.19599977444902, coupling = -0.00023289220031456672, dipole_moment_1 = 0.43105974279098397, dipole_moment_2 = 0.9398599634992078, temp = 300.0, chain_length = 150.0, num_fock = 30.0, 
+	 observables : 
+	 convparams : 40
+
+loading MPSDynamics............done
+Dmax : 40 
+1/2, t = 0.000 + 0.000im 
+2/2, t = 10.000 + 0.000im 
+[2025-06-12T20:46:02.105] => RUN <emission> END
+	 output files produced
+
+total run time : 1 minute, 20 seconds, 653 milliseconds

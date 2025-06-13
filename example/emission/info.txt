@@ -1,0 +1,8 @@
+	 name : Indole in Water: emission
+	 machine : local
+	 method : TDVP1
+	 dt = 10.0
+	 tmax = 20.0
+	 parameters : energy_1 = 0.1875421749387275, energy_2 = 0.19599977444902, coupling = -0.00023289220031456672, dipole_moment_1 = 0.43105974279098397, dipole_moment_2 = 0.9398599634992078, temp = 300.0, chain_length = 150.0, num_fock = 30.0, 
+	 observables : 
+	 convparams : 40
