@@ -1,0 +1,204 @@
+#! /usr/bin/env julia
+#
+# MPSDynamics wrapper for linear spectroscopy, modified to run on GPUs.
+#
+# Includes chunked imaginary time evolution to approximately construct ground state.
+# Imaginary time propagation only runs if: temp = 0 & PROP_IMAG = true.
+# Otherwise, uses relaxed state from absorption as initial state for emission
+
+############################################
+############ INPUT PARAMETERS ##############
+############################################
+
+run_name = "example"
+
+energy_1 = 0.1875421749387275 
+energy_2 = 0.19599977444902 
+coupling = -0.00023289220031456672
+dipole_moment_1 = 0.43105974279098397
+dipole_moment_2 = 0.9398599634992078
+
+
+savedir = pwd() * "/"
+coeffsdir = savedir * "chain_coeffs.hdf5"
+
+time_step             = 10.0
+total_time_absorption = 20.0
+total_time_emission   = 20.0
+temp                  = 300
+chain_length          = 150
+num_fock              = 30
+bond_dims             = [40]
+
+PROP_IMAG             = false
+imag_time_step        = -50.0im
+max_imag_time         = -3000.0im
+chunk_imag_time       = -50.0im
+
+if PROP_IMAG && temp != 0
+    println("Error: temp not 0.")
+    exit(1)
+end
+
+############################################
+############################################
+############################################
+
+using CUDA
+using cuTENSOR
+using ITensors
+using TensorOperations
+include("/home/lamberev/mpsdynamics_github61225/src/MPSDynamics.jl")
+using .MPSDynamics
+
+function get_temp_str(temp_val)
+    if temp_val == 0
+        return "0.0"
+    elseif isinteger(temp_val)
+        return string(Int(round(temp_val)))
+    else
+        return string(temp_val)
+    end
+end
+
+s1_chain_coeffs = readchaincoeffs(coeffsdir, "temp_" * get_temp_str(temp), "s1")
+long_range_s1_to_s2 = h5read( coeffsdir, "temp_" * get_temp_str(temp) * "/long_range_s1_to_s2")
+s2_chain_coeffs = readchaincoeffs(coeffsdir, "temp_" * get_temp_str(temp), "s2")
+long_range_s2_to_s1 = h5read(coeffsdir, "temp_" * get_temp_str(temp) * "/long_range_s2_to_s1")
+s1_s2_coupling = readchaincoeffs(coeffsdir, "temp_" * get_temp_str(temp), "s1_s2_coupling")
+
+# Hamiltonian
+mpo_cpu = methylbluempo2(
+    energy_1,     energy_2,     coupling,
+    chain_length, chain_length, chain_length,
+    num_fock,     num_fock,     num_fock,
+    s1_chain_coeffs, long_range_s1_to_s2, long_range_s2_to_s1, s2_chain_coeffs,
+    s1_s2_coupling
+)
+
+mpo = MPSDynamics.to_gpu(mpo_cpu)
+
+# Define operators for the system
+s2 = unitcol(1, 3)
+s1 = unitcol(2, 3)
+s0 = unitcol(3, 3)
+# Initial populations for absorption
+psi = (s0 + dipole_moment_1* s1 + dipole_moment_2 * s2) / sqrt(1 + dipole_moment_1^ 2 + dipole_moment_2 ^ 2)
+# Dipole operator
+mu = dipole_moment_1* s0 * s1' + dipole_moment_2 * s0 * s2'
+
+# Initial product state
+mps = productstatemps(mpo.tree, physdims(mpo), state = [psi, fill(unitcol(1, num_fock), 3 * chain_length)...])
+
+# Observables
+ob4  = MPSDynamics.oso_to_gpu(OneSiteObservable("occ1", numb(num_fock), (2, chain_length + 1)))
+ob5  = MPSDynamics.oso_to_gpu(OneSiteObservable("occ2", numb(num_fock), (chain_length + 2, 2 * chain_length + 1)))
+ob6  = MPSDynamics.oso_to_gpu(OneSiteObservable("occ12", numb(num_fock), (2 * chain_length + 2, 3 * chain_length +1)))
+ob7  = MPSDynamics.oso_to_gpu(OneSiteObservable("dcf", mu, 1))
+ob8  = MPSDynamics.oso_to_gpu(OneSiteObservable("s0", s0 * s0', 1))
+ob9  = MPSDynamics.oso_to_gpu(OneSiteObservable("s1", s1 * s1', 1))
+ob10 = MPSDynamics.oso_to_gpu(OneSiteObservable("s2", s2 * s2', 1))
+ob11 = MPSDynamics.oso_to_gpu(OneSiteObservable("s1s2", s1 * s2', 1))
+ob12 = MPSDynamics.oso_to_gpu(OneSiteObservable("s0s2", s0 * s2', 1))
+ob13 = MPSDynamics.oso_to_gpu(OneSiteObservable("s0s1", s0 * s1', 1))
+absorption_emission_convobs = [ob4, ob5, ob6, ob7, ob8, ob9, ob10, ob11, ob12, ob13]
+
+# Propogate excited state (to calculate the absorption spectrum)
+mps_relaxed, dat_abs = runsim(
+    time_step, total_time_absorption, mps, mpo;
+    name = run_name * ": absorption",
+    unid = "absorption",
+    method = :TDVP1,
+    savedir = savedir,
+    obs = [],
+    convobs = absorption_emission_convobs,
+    convparams = bond_dims,
+    verbose = false,
+    save = true,
+    plot = true,
+    params = @LogParams(
+        psi,
+        energy_1, energy_2, coupling, 
+        dipole_moment_1, dipole_moment_2,
+        temp, chain_length, num_fock
+    )
+)
+
+if PROP_IMAG && temp == 0
+    global mps_ground_current = deepcopy(mps_relaxed)
+    global cumulative_imag_time = 0.0im
+    global chunk_num = 0
+
+    while abs(cumulative_imag_time) < abs(max_imag_time)
+        global chunk_num += 1
+        println("\n--- Chunk ", chunk_num, " ---")
+
+        remaining_time = max_imag_time - cumulative_imag_time
+        time_this_chunk_val = min(abs(chunk_imag_time), abs(remaining_time))
+        time_this_chunk = sign(imag_time_step) * time_this_chunk_val
+
+        mps_chunk_end, dat_chunk = runsim(
+            imag_time_step, time_this_chunk, mps_ground_current, mpo;
+            name = run_name * ": chunk " * string(chunk_num),
+            unid = "chunk_" * string(chunk_num),
+            method = :TDVP1,
+            savedir = savedir,
+            obs = [],
+            convobs = [],
+            convparams = bond_dims,
+            verbose = false,
+            save = true,
+            plot = false,
+            params = @LogParams(
+                imag_time_step, time_this_chunk, cumulative_imag_time,
+                temp, chain_length, num_fock
+            )
+        )
+
+        global mps_ground_current = mps_chunk_end
+        global cumulative_imag_time += time_this_chunk
+
+        head_node_index = MPSDynamics.findheadnode(mps_ground_current.tree)
+        norm_sq_gpu = MPSDynamics.normmps(mps_ground_current; mpsorthog=head_node_index)
+        norm_sq_cpu = Array(norm_sq_gpu)[1]
+        println("Chunk ", chunk_num, " norm: ", sqrt(norm_sq_cpu))
+
+        mps_vector = mps_ground_current.sites
+        mps_ground_normalized_vector = deepcopy(mps_vector)
+
+        mps_ground_normalized_vector[head_node_index] = mps_ground_normalized_vector[head_node_index] / sqrt.(norm_sq_gpu)
+
+        global mps_ground_current = MPSDynamics.TreeNetwork(mps_ground_current.tree, mps_ground_normalized_vector)
+
+        println("Cumulative time: ", cumulative_imag_time)
+    end
+
+    println("-"^40)
+    println("Reached max imag time: ", cumulative_imag_time)
+    println("-"^40)
+
+    global mps_ground_final = mps_ground_current
+else
+    global mps_ground_final = deepcopy(mps_relaxed)
+end
+
+mps_ground_final[1][:, :, :, :, 3] = (dipole_moment_1 *  mps_ground_final[1][:, :, :, :, 2] + dipole_moment_2 *  mps_ground_final[1][:, :, :, :, 1])
+
+mps_emitted, dat_emission = runsim(
+    time_step, total_time_emission, mps_ground_final, mpo;
+    name = run_name * ": emission",
+    unid = "emission",
+    method = :TDVP1,
+    savedir = savedir,
+    obs = [],
+    convobs = absorption_emission_convobs,
+    convparams = bond_dims,
+    verbose = false,
+    save = true,
+    plot = true,
+    params = @LogParams(
+        energy_1, energy_2, coupling, 
+        dipole_moment_1, dipole_moment_2,
+        temp, chain_length, num_fock
+    )
+)

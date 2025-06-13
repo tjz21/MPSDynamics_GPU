@@ -12,6 +12,3 @@ function flatten!(dict::Dict, dictout::Dict, tag::String="")
 end
 flatten(dict::Dict) = flatten!(dict, Dict())
 
-
-
-

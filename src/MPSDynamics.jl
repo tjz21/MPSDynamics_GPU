@@ -1,117 +1,44 @@
 module MPSDynamics
 
-GPU = false
-if length(ARGS) > 0 && ARGS[1] == "GPU"
+using CUDA
+using cuTENSOR
+using JLD, HDF5, Random, Dates, Plots, Printf, Distributed, LinearAlgebra, DelimitedFiles, KrylovKit, GraphRecipes, SpecialFunctions, Interpolations, TensorOperations, ITensors, ITensorMPS
 
-  # A CUDA compatible macro to overwrite TensorOperations.@tensoropt
-  # is this still needed? 
-  #macro tensoropt(expressions...)
-  #  if length(expressions) == 1
-  #    ex = expressions[1]
-  #    optdict = TensorOperations.optdata(ex)
-  #  elseif length(expressions) == 2
-  #    optex = expressions[1]
-  #    ex = expressions[2]
-  #    optdict = TensorOperations.optdata(optex, ex)
-  #  end
-
-  #  cuwrapdict = Dict{Any,Any}()
-  #  parser = TensorOperations.TensorParser()
-  #  parser.contractiontreebuilder = network -> TensorOperations.optimaltree(
-  #    network, optdict
-  #  )[1]
-  #  parser.preprocessors[end] = ex -> TensorOperations.extracttensorobjects(
-  #    ex, cuwrapdict
-  #  )
-  #  push!(
-  #    parser.postprocessors, 
-  #    ex -> TensorOperations.addcutensorwraps(ex, cuwrapdict)
-  #  )
-  #  return esc(parser(ex))
-  #end
-
-  using CUDA
-  # We also overwrite @tensor; this does most of the GPU acceleration for us.
-  import TensorOperations: @cutensor as @tensor
-
-  using LinearAlgebra
-
-  # Make LQPackedQ functional on GPUs (see 
-  # https://github.com/JuliaGPU/CUDA.jl/issues/1893#issuecomment-1533783048)
-  function Base.getindex(
-    Q::LinearAlgebra.LQPackedQ{<:Any, <:CuArray}, ::Colon, j::Int
-  )
-    y = CuArray{eltype(Q)}(diagm(size(Q, 2), 1, (-j + 1) => [1]))
-    return lmul!(Q, y)
-  end  
-  function Base.getindex(
-    Q::LinearAlgebra.LQPackedQ{<:Any, <:CuArray}, i::Int, j::Int
-  )
-    x = CuArray{eltype(Q)}(diagm(size(Q, 2), 1, (-j + 1) => [1]))
-    y = CuArray{eltype(Q)}(diagm(size(Q, 2), 1, (-i + 1) => [1]))
-    Q = lmul!(Q, y)
-    return sum(Q * x)
-  end
-  function CuMatrix{T}(Q::LinearAlgebra.LQPackedQ{S}) where {T,S}
-    return CuMatrix{T}(lmul!(
-      Q, 
-      CuMatrix{S}(I, size(Q, 1), min(size(Q.factors)...))
-    ))
-  end
-
-  # Define CUDA versions of LAPACK LQ functions in terms of QR functions
-  function LinearAlgebra.LAPACK.orglq!(A::CuArray, tau::CuArray)
-    return CuArray(transpose(CUDA.CUSOLVER.orgqr!(
-      CuArray(transpose(A)), tau 
-    ))) 
-  end
-  function LinearAlgebra.LAPACK.ormlq!(
-    side::Char, trans::Char, A::CuArray, tau::CuArray, C::Union{Vector, CuArray}
-  )
-    return CuArray(transpose(CUDA.CUSOLVER.ormqr!(
-      side, trans, CuArray(transpose(A)), tau, CuArray(C)
-    ))) 
-  end
-  # This version of lq returns an LQPackedQ
-  function LinearAlgebra.lq!(A::CuArray{T, 2}) where T
-    Q, R = qr(CuArray(transpose(A)))
-    if typeof(Q) <: LinearAlgebra.QRCompactWYQ
-      Q_factors, Q_t = Q.factors, Q.T
-    elseif typeof(Q) <: LinearAlgebra.QRPackedQ
-      Q_factors, Q_t = Q.factors, Q.τ
-    else
-      println("don't know what type Q is")
-    end
-    Q = LinearAlgebra.LQPackedQ(
-      CuMatrix(transpose(Q_factors)),
-      CuMatrix(transpose(Q_t))[1:end]
-    )
-    L = CuArray(transpose(R))
-    return L, Q
-  end
-
-  # A simpler way to do lq, but returning L and Q instead of the packed matrices
-  #function LinearAlgebra.lq!(A::CuMatrix{T}) where T 
-  #  Q, R = qr(CuArray(transpose(A::CuMatrix{T})))
-  #  Q = lmul!(
-  #    Q, 
-  #    CuArray{eltype(Q)}(diagm(size(Q)..., [1 for _ in 1:min(size(Q)...)]))
-  #  )
-  #  L, Q = CuArray(transpose(R)), CuArray(transpose(Q))
-  #  return L, Q
-  #end
-
-  GPU = true
-  println("Attempting to run on GPUs")
-  # make sure to load cuTensor
-
-else
-  # Define CuArray and CuMatrix as dummy variables to avoid errors
-  CuArray = Array
-  CuMatrix = Matrix
+function Base.getindex(Q::LinearAlgebra.LQPackedQ{<:Any, <:CuArray}, ::Colon, j::Int)
+  y = CuArray{eltype(Q)}(diagm(size(Q, 2), 1, (-j + 1) => [1]))
+  return lmul!(Q, y)
+end  
+function Base.getindex(Q::LinearAlgebra.LQPackedQ{<:Any, <:CuArray}, i::Int, j::Int)
+  x = CuArray{eltype(Q)}(diagm(size(Q, 2), 1, (-j + 1) => [1]))
+  y = CuArray{eltype(Q)}(diagm(size(Q, 2), 1, (-i + 1) => [1]))
+  Q = lmul!(Q, y)
+  return sum(Q * x)
+end
+function CuMatrix{T}(Q::LinearAlgebra.LQPackedQ{S}) where {T,S}
+  return CuMatrix{T}(lmul!(Q, CuMatrix{S}(I, size(Q, 1), min(size(Q.factors)...))))
 end
 
-using JLD, HDF5, Random, Dates, Plots, Printf, Distributed, LinearAlgebra, DelimitedFiles, KrylovKit, TensorOperations, GraphRecipes, SpecialFunctions, ITensors
+# Define CUDA versions of LAPACK lq functions in terms of qr
+function LinearAlgebra.LAPACK.orglq!(A::CuArray, tau::CuArray)
+  return CuArray(transpose(CUDA.CUSOLVER.orgqr!(CuArray(transpose(A)), tau ))) 
+end
+function LinearAlgebra.LAPACK.ormlq!(side::Char, trans::Char, A::CuArray, tau::CuArray, C::CuArray)
+    return CuArray(transpose(CUDA.CUSOLVER.ormqr!(side, trans, CuArray(transpose(A)), tau, CuArray(C))))
+end
+
+function LinearAlgebra.lq!(A::CuArray{T, 2}) where T
+  Q, R = qr(CuArray(transpose(A)))
+  if typeof(Q) <: LinearAlgebra.QRCompactWYQ
+    Q_factors, Q_t = Q.factors, Q.T
+  elseif typeof(Q) <: LinearAlgebra.QRPackedQ
+    Q_factors, Q_t = Q.factors, Q.τ
+  else
+    println("don't know what type Q is")
+  end
+  Q = LinearAlgebra.LQPackedQ(CuMatrix(transpose(Q_factors)), CuMatrix(transpose(Q_t))[1:end])
+  L = CuArray(transpose(R))
+  return L, Q
+end
 
 include("fundamentals.jl")
 include("reshape.jl")
@@ -125,21 +52,47 @@ include("treeBasics.jl")
 include("treeIterators.jl")
 include("treeMeasure.jl")
 include("treeTDVP.jl")
-include("treeDTDVP.jl")
 include("mpsBasics.jl")
 include("chainTDVP.jl")
-include("chain2TDVP.jl")
-include("chainDMRG.jl")
 include("models.jl")
 include("logging.jl")
 include("run_all.jl")
 include("run_1TDVP.jl")
-include("run_2TDVP.jl")
-include("run_DTDVP.jl")
-include("run_A1TDVP.jl")
+include("utilities.jl")
 
-include("chainA1TDVP.jl")
+"""
+    runsim(dt, tmax, A, H; 
+		method=:TDVP1, 
+		machine=LocalMachine(), 
+		params=[], 
+		obs=[], 
+		convobs=[],
+                convparams=error("Must specify convergence parameters"),
+                save=false,
+                plot=save,
+                savedir=string(homedir(),"/MPSDynamics/"),
+                unid=randstring(5),
+                name=nothing,
+		kwargs...
+		)
+
+Propagate the MPS `A` with the MPO `H` up to time `tmax` in time steps of `dt`. The final MPS is returned to `A` and the measurement data is returned to `dat` 
+
+# Arguments
+
+* `method`: Several methods are implemented in MPSDynamics. `:TDVP1` refers to 1-site TDVP on tree and chain MPS, `:TDVP2` refers to 2-site TDVP on chain MPS, `:DTDVP` refers to a variant of 1-site TDVP with dynamics bond-dimensions on chain MPS
+* `machine`: `LocalMachine()` points local ressources, `RemoteMachine()` points distant ressources
+* `params`: list of parameters written in the log.txt file to describe the dynamics. Can be listed with @LogParams(). 
+* `obs`: list of observables that will be measured at every time step for the most accurate convergence parameter supplied to `convparams` 
+* `convobs`: list of observables that will be measure at every time step for every convergence parameter supplied to `convparams` 
+* `convparams`: list of convergence parameter with which the propagation will be calculated for every parameter. At each parameter, `convobs` are measured while `obs` are measured only for the most accurate dynamics
+* `save`: Used to choose whether the data will also be saved to a file  
+* `plot`: Used to choose whether plots for 1D observables will be automatically generated and saved along with the data
+* `savedir`: Used to specify the path where resulting files are stored
+* `unid`: Used to specify the name of the directory containing the resulting files
+* `name`: Used to describe the calculation. This name will appear in the log.txt file
  
+"""
 function runsim(dt, tmax, A, H;
                 method=:TDVP1,
                 machine=LocalMachine(),
@@ -165,12 +118,16 @@ function runsim(dt, tmax, A, H;
         convparams = typeof(convparams) <: Vector ? only(convparams) : convparams
     end
 
-    if save || plot
+    if save || plot || (:onthefly in keys(kwargs) && !isempty(kwargs[:onthefly][:save_obs]) && kwargs[:onthefly][:savedir] == "auto")
         if savedir[end] != '/'
             savedir = string(savedir,"/")
         end
         isdir(savedir) || mkdir(savedir)
         open_log(dt, tmax, convparams, method, machine, savedir, unid, name, params, obs, convobs, convcheck, kwargs...)
+        if :onthefly in keys(kwargs)
+            mkdir(string(savedir, unid, "/tmp/"))
+            kwargs[:onthefly][:savedir] = string(savedir, unid, "/tmp/")
+        end
     end
 
     paramdict = Dict([[(par[1], par[2]) for par in params]...,
@@ -189,9 +146,7 @@ function runsim(dt, tmax, A, H;
     A0, dat = try
         out = launch_workers(machine) do pid
             print("loading MPSDynamics............")
-            if !GPU
-                #@everywhere pid eval(using MPSDynamics)
-            end
+            #@everywhere pid eval(using MPSDynamics)
             println("done")
             out = fetch(@spawnat only(pid) run_all(dt, tmax, A, H;
                                                        method=method,
@@ -229,13 +184,13 @@ function runsim(dt, tmax, A, H;
     return A0, dat
 end
 
-export sz, sx, sy, numb, crea, anih, unitcol, unitrow, unitmat, spinSX, spinSY, spinSZ, SZ, SX, SY
+export numb, crea, anih, unitcol, unitrow, unitmat
 
-export chaincoeffs_ohmic, spinbosonmpo, methylbluempo, methylbluempo_correlated, methylbluempo_correlated_nocoupling, methylbluempo_nocoupling, ibmmpo, methylblue_S1_mpo, methylbluempo2, twobathspinmpo, xyzmpo
+export spinbosonmpo, methylbluempo2
 
 export productstatemps, physdims, randmps, bonddims, elementmps
 
-export measure, measurempo, OneSiteObservable, TwoSiteObservable, FockError, errorbar
+export measure, measurempo, OneSiteObservable, TwoSiteObservable, RhoReduced, FockError, errorbar
 
 export runsim, run_all
 
@@ -243,13 +198,17 @@ export Machine, RemoteMachine, LocalMachine, init_machines, update_machines, lau
 
 export randtree
 
-export readchaincoeffs, h5read, load
+export readchaincoeffs, h5read, load, findchainlength
 
 export println, print, show
 
 export @LogParams
 
-export MPOtoVector, MPStoVector
+export MPOtoVector
+
+export rhoreduced_2sites, rhoreduced_1site
+
+export onthefly, mergetmp
 
 end
 

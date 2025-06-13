@@ -1,10 +1,10 @@
 mutable struct TreeNode
     parent::Int
-    children::Vector{Int}
+    children::AbstractVector{Int}
 end
 
 mutable struct Tree
-    nodes::Vector{TreeNode}
+    nodes::AbstractVector{TreeNode}
 end
 Tree() = Tree([TreeNode(0, Vector{Int}())])
 function Tree(len::Int)
@@ -17,9 +17,9 @@ end
 
 mutable struct TreeNetwork{T}
     tree::Tree
-    sites::Vector{T}
+    sites::AbstractVector{T}
 end
-TreeNetwork(sites::Vector{T}) where {T} = TreeNetwork{T}(Tree(length(sites)), sites)
+TreeNetwork(sites::AbstractVector{T}) where {T} = TreeNetwork{T}(Tree(length(sites)), sites)
 
 Base.length(tree::Tree) = length(tree.nodes)
 Base.length(net::TreeNetwork) = length(net.tree.nodes)
@@ -228,7 +228,7 @@ Return integer corresponding to the which number child site `id` is of `node`.
 function findchild(node::TreeNode, id::Int)
     return findfirst(x->x==id, node.children)
 end
-function findchild(children::Vector{Int}, id::Int)
+function findchild(children::AbstractVector{Int}, id::Int)
     return findfirst(x->x==id, children)
 end
 isconnected(node::TreeNode, id::Int) = in(id, node.children) || id==node.parent    
@@ -281,7 +281,7 @@ function setheadnode!(net::TreeNetwork, id::Int)
         IC = collect(1:nd)
         deleteat!(IC, childpos)
         pushfirst!(IC, childpos)
-        net[par] = tensorcopy(Apar, IA, IC)
+        net[par] = tensorcopy(Apar, IA, IC; backend=cuTENSORBackend(), allocator=CUDAAllocator())
         #println("add dummy index to new head-node")
         Ahead = net[id]
         net[id] = reshape(Ahead, 1, size(Ahead)...)        

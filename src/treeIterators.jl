@@ -152,7 +152,7 @@ end
 Base.lastindex(iter::Union{Radial,Walk,Traverse,Path}) = length(iter)
 Base.firstindex(iter::Union{Radial,Walk,Traverse,Path}) = 1
 
-function Base.iterate(iter::Radial{Tree}, state::Vector{Int})
+function Base.iterate(iter::Radial{Tree}, state::AbstractVector{Int})
     children = state
     length(children) == 0 && return nothing
     tree = iter.iter
@@ -166,7 +166,7 @@ function Base.iterate(iter::Radial{Tree})
     return ([hn], children)
 end
 
-function Base.iterate(iter::Radial{TreeNetwork{T}}, state::Vector{Int}) where {T}
+function Base.iterate(iter::Radial{TreeNetwork{T}}, state::AbstractVector{Int}) where {T}
     net = iter.iter
     start = iter.start
     next = iterate(Radial(net.tree, start), state)

@@ -19,7 +19,6 @@ end
 launch_workers(nworkers::Int=1) = (nworkers==1 ? [1] : [1, addprocs(nworkers-1)...])
 launch_workers(::LocalMachine, nworkers::Int=1) = launch_workers(nworkers)
 
-
 function launch_workers(machs::Vector{T}, nworkers::Int=1) where T <: Machine
     pids = Int[]
     for mach in machs
@@ -40,7 +39,7 @@ end
 function init_machines(machs::Vector{T}) where T <: Machine
     launch_workers(machs) do pid
         @everywhere pid eval(using Pkg)
-        @everywhere pid Pkg.add(PackageSpec(url="https://github.com/angusdunnett/MPSDynamics.git", rev="master"))
+        @everywhere pid Pkg.add(PackageSpec(url="https://github.com/shareloqs/MPSDynamics.git", rev="master"))
     end
 end
 
